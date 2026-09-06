@@ -64,6 +64,44 @@ def root():
     return {"message": "Fraud Risk Scoring API. Try /analyze/{tx_id}"}
 
 
+# Results from the offline train/test runs (train_model.py, train_gnn.py) -
+# time-based split, timesteps 1-34 train / 35-49 test. Not recomputed at
+# request time; update these if the models are retrained with changes.
+RESULTS = {
+    "test_set": {"total": 16670, "illicit": 1083},
+    "models": [
+        {
+            "name": "Baseline",
+            "description": "Raw 165 transaction features only, XGBoost",
+            "precision": 0.90, "recall": 0.73, "f1": 0.80
+        },
+        {
+            "name": "Graph-augmented",
+            "description": "Raw features + hand-engineered graph features (cycle flag, community illicit ratio, degree/betweenness centrality), XGBoost",
+            "precision": 0.95, "recall": 0.73, "f1": 0.82
+        },
+        {
+            "name": "GCN",
+            "description": "Raw features + learned graph structure (2-layer Graph Convolutional Network, no hand-engineered features)",
+            "precision": 0.62, "recall": 0.62, "f1": 0.62
+        }
+    ],
+    "note": (
+        "The GCN underperforms both XGBoost models, consistent with the original Elliptic "
+        "benchmark paper (Weber et al., 2019), where a similarly simple GCN also lost to a "
+        "Random Forest with hand-engineered features. Likely causes: no temporal modeling "
+        "(the graph evolves over 49 timesteps and this GCN has no notion of time), a plain "
+        "2-layer architecture with no attention, and no hyperparameter tuning on any of the "
+        "three models."
+    )
+}
+
+
+@app.get("/results")
+def results():
+    return RESULTS
+
+
 @app.get("/analyze/{tx_id}")
 def analyze(tx_id: int):
     return score_tx(tx_id)

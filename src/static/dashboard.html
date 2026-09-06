@@ -78,11 +78,29 @@
   .badge.no { background: rgba(139,147,163,0.12); color: var(--muted); }
   .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
   .error { color: var(--high); font-size: 13px; }
+  .section-title { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
+  .model-name { font-weight: 600; }
+  .model-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .note-box {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: #0d0f13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
 </style>
 </head>
 <body>
   <h1>Fraud Risk Dashboard</h1>
-  <div class="subtitle">Transaction Graph Fraud Detection — Elliptic dataset, graph-augmented XGBoost model</div>
+  <div class="subtitle">Transaction Graph Fraud Detection — Elliptic dataset</div>
+
+  <div class="panel">
+    <div class="section-title">Model comparison (held-out test set, timesteps 35-49)</div>
+    <div id="resultsArea"><div class="empty">Loading results...</div></div>
+  </div>
 
   <div class="panel">
     <label for="ids">Transaction IDs (comma or newline separated)</label>
@@ -202,8 +220,57 @@ async function loadSample() {
   }
 }
 
+function bestValue(models, key) {
+  return Math.max(...models.map(m => m[key]));
+}
+
+function renderResults(data) {
+  const resultsArea = document.getElementById('resultsArea');
+  const best = {
+    precision: bestValue(data.models, 'precision'),
+    recall: bestValue(data.models, 'recall'),
+    f1: bestValue(data.models, 'f1')
+  };
+
+  const rows = data.models.map(m => `
+    <tr>
+      <td>
+        <div class="model-name">${m.name}</div>
+        <div class="model-desc">${m.description}</div>
+      </td>
+      <td class="mono" style="${m.precision === best.precision ? 'color:var(--low);font-weight:600' : ''}">${m.precision.toFixed(2)}</td>
+      <td class="mono" style="${m.recall === best.recall ? 'color:var(--low);font-weight:600' : ''}">${m.recall.toFixed(2)}</td>
+      <td class="mono" style="${m.f1 === best.f1 ? 'color:var(--low);font-weight:600' : ''}">${m.f1.toFixed(2)}</td>
+    </tr>
+  `).join('');
+
+  resultsArea.innerHTML = `
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Precision (illicit)</th><th>Recall (illicit)</th><th>F1 (illicit)</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="note-box">
+      Test set: ${data.test_set.total.toLocaleString()} transactions (${data.test_set.illicit.toLocaleString()} illicit), timesteps 35-49, held out from training.<br><br>
+      ${data.note}
+    </div>
+  `;
+}
+
+async function loadResults() {
+  try {
+    const res = await fetch('/results');
+    const data = await res.json();
+    renderResults(data);
+  } catch (err) {
+    document.getElementById('resultsArea').innerHTML = '<div class="empty error">Could not load results: ' + err.message + '</div>';
+  }
+}
+
 analyzeBtn.addEventListener('click', analyze);
 sampleBtn.addEventListener('click', loadSample);
+loadResults();
 </script>
 </body>
 </html>
