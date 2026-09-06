@@ -1,7 +1,17 @@
 # Transaction Graph Fraud Detection
 
 ## Problem
-[1 paragraph: connect this to your SCSC investigation background - why you built this]
+Cybercrime and financial-fraud investigations increasingly run into cryptocurrency transactions that
+launder proceeds through long chains of wallets designed to obscure the money trail. Manually tracing
+these chains transaction-by-transaction doesn't scale, and looking at any single transaction in
+isolation misses the patterns that actually indicate laundering — a wallet's position in the broader
+transaction graph (who it clusters with, how central it is, whether it sits in a loop of transfers)
+often carries more signal than the transaction's own attributes. This project tests whether adding
+that graph structure as features to a standard classifier meaningfully improves fraud detection over
+using transaction-level features alone.
+
+<!-- TODO: replace this with your own framing if you want it to reference specific investigation
+     experience (e.g. SCSC casework) rather than the generic version above. -->
 
 ## Dataset
 Elliptic Data Set - a labeled Bitcoin transaction graph (203,769 nodes, 234,355 edges,
