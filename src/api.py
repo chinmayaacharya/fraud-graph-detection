@@ -1,14 +1,24 @@
+import os
+import random
+
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import joblib
 import pandas as pd
 import pickle
 
 app = FastAPI(title="Fraud Risk Scoring API")
 
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
 model = joblib.load('data/model.pkl')
 
 features = pd.read_csv('data/elliptic_txs_features.csv', header=None)
 features.columns = ['txId', 'timestep'] + [f'feat_{i}' for i in range(165)]
+feat_cols = [c for c in features.columns if c.startswith('feat_')]
+
+classes = pd.read_csv('data/elliptic_txs_classes.csv', dtype={'class': str})
 
 with open('data/cycle_flags.pkl', 'rb') as f:
     cycle_flags = pickle.load(f)
@@ -18,18 +28,11 @@ with open('data/centrality_data.pkl', 'rb') as f:
     centrality_data = pickle.load(f)
 
 
-@app.get("/")
-def root():
-    return {"message": "Fraud Risk Scoring API. Try /analyze/{tx_id}"}
-
-
-@app.get("/analyze/{tx_id}")
-def analyze(tx_id: int):
+def score_tx(tx_id: int):
     row = features[features['txId'] == tx_id]
     if row.empty:
-        return {"error": "Transaction ID not found"}
+        return {"tx_id": tx_id, "error": "Transaction ID not found"}
 
-    feat_cols = [c for c in features.columns if c.startswith('feat_')]
     row_features = row[feat_cols].values[0].tolist()
 
     in_cycle = 1 if tx_id in cycle_flags else 0
@@ -49,3 +52,43 @@ def analyze(tx_id: int):
             "high_risk_community": bool(community_ratio > 0.3)
         }
     }
+
+
+@app.get("/")
+def dashboard():
+    return FileResponse(os.path.join(STATIC_DIR, "dashboard.html"))
+
+
+@app.get("/api")
+def root():
+    return {"message": "Fraud Risk Scoring API. Try /analyze/{tx_id}"}
+
+
+@app.get("/analyze/{tx_id}")
+def analyze(tx_id: int):
+    return score_tx(tx_id)
+
+
+class BatchRequest(BaseModel):
+    tx_ids: list[int]
+
+
+@app.post("/analyze/batch")
+def analyze_batch(req: BatchRequest):
+    return [score_tx(tx_id) for tx_id in req.tx_ids]
+
+
+@app.get("/sample")
+def sample(n: int = 20):
+    # Mix known illicit and licit transactions so a batch run actually shows
+    # contrast in risk scores, instead of n random (mostly licit) txns.
+    labeled = classes[classes['class'] != 'unknown']
+    illicit_ids = labeled[labeled['class'] == '1']['txId'].tolist()
+    licit_ids = labeled[labeled['class'] == '2']['txId'].tolist()
+
+    n_illicit = min(n // 2, len(illicit_ids))
+    n_licit = min(n - n_illicit, len(licit_ids))
+
+    sampled = random.sample(illicit_ids, n_illicit) + random.sample(licit_ids, n_licit)
+    random.shuffle(sampled)
+    return {"tx_ids": [int(x) for x in sampled]}

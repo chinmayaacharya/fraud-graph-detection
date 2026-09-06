@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fraud Risk Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e6e8ec;
+    --muted: #8b93a3;
+    --accent: #5b8cff;
+    --low: #3ecf6d;
+    --mid: #f0b429;
+    --high: #f0473e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    padding: 32px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 6px; }
+  textarea {
+    width: 100%;
+    min-height: 80px;
+    background: #0d0f13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    resize: vertical;
+  }
+  .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { font-size: 12px; color: var(--muted); }
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: grid; grid-template-columns: 110px 1fr 60px; align-items: center; gap: 10px; }
+  .bar-label { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .bar-track { background: #0d0f13; border-radius: 6px; height: 18px; overflow: hidden; border: 1px solid var(--border); }
+  .bar-fill { height: 100%; border-radius: 6px; }
+  .bar-value { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.mono { font-family: ui-monospace, monospace; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.yes { background: rgba(240,71,62,0.15); color: var(--high); }
+  .badge.no { background: rgba(139,147,163,0.12); color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+  .error { color: var(--high); font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>Fraud Risk Dashboard</h1>
+  <div class="subtitle">Transaction Graph Fraud Detection — Elliptic dataset, graph-augmented XGBoost model</div>
+
+  <div class="panel">
+    <label for="ids">Transaction IDs (comma or newline separated)</label>
+    <textarea id="ids" placeholder="e.g. 230425980, 232438397"></textarea>
+    <div class="row">
+      <button id="analyzeBtn">Analyze</button>
+      <button class="secondary" id="sampleBtn">Load sample IDs</button>
+      <span class="status" id="status"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div id="chart" class="bars"><div class="empty">Run an analysis to see results here.</div></div>
+  </div>
+
+  <div class="panel">
+    <table id="table" style="display:none">
+      <thead>
+        <tr><th>TX ID</th><th>Risk score</th><th>In cycle</th><th>High-risk community</th></tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+
+<script>
+const idsEl = document.getElementById('ids');
+const statusEl = document.getElementById('status');
+const chartEl = document.getElementById('chart');
+const tableEl = document.getElementById('table');
+const tableBody = document.getElementById('tableBody');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const sampleBtn = document.getElementById('sampleBtn');
+
+function parseIds(text) {
+  return text
+    .split(/[,\n]/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => parseInt(s, 10))
+    .filter(n => !Number.isNaN(n));
+}
+
+function riskColor(score) {
+  if (score >= 0.6) return getComputedStyle(document.documentElement).getPropertyValue('--high');
+  if (score >= 0.2) return getComputedStyle(document.documentElement).getPropertyValue('--mid');
+  return getComputedStyle(document.documentElement).getPropertyValue('--low');
+}
+
+function render(results) {
+  const valid = results.filter(r => !r.error);
+  const errors = results.filter(r => r.error);
+
+  if (valid.length === 0) {
+    chartEl.innerHTML = '<div class="empty error">No valid results' + (errors.length ? ' — ' + errors.length + ' ID(s) not found in dataset.' : '') + '</div>';
+    tableEl.style.display = 'none';
+    return;
+  }
+
+  const sorted = [...valid].sort((a, b) => b.risk_score - a.risk_score);
+
+  chartEl.innerHTML = sorted.map(r => `
+    <div class="bar-row">
+      <div class="bar-label">${r.tx_id}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(r.risk_score*100).toFixed(1)}%; background:${riskColor(r.risk_score)}"></div></div>
+      <div class="bar-value">${(r.risk_score*100).toFixed(1)}%</div>
+    </div>
+  `).join('') + (errors.length ? `<div class="empty error" style="margin-top:8px">${errors.length} ID(s) not found: ${errors.map(e => e.tx_id).join(', ')}</div>` : '');
+
+  tableBody.innerHTML = sorted.map(r => `
+    <tr>
+      <td class="mono">${r.tx_id}</td>
+      <td class="mono">${r.risk_score.toFixed(4)}</td>
+      <td><span class="badge ${r.flags.in_cycle ? 'yes' : 'no'}">${r.flags.in_cycle ? 'yes' : 'no'}</span></td>
+      <td><span class="badge ${r.flags.high_risk_community ? 'yes' : 'no'}">${r.flags.high_risk_community ? 'yes' : 'no'}</span></td>
+    </tr>
+  `).join('');
+  tableEl.style.display = 'table';
+}
+
+async function analyze() {
+  const tx_ids = parseIds(idsEl.value);
+  if (tx_ids.length === 0) {
+    statusEl.textContent = 'Enter at least one transaction ID.';
+    return;
+  }
+  analyzeBtn.disabled = true;
+  statusEl.textContent = `Scoring ${tx_ids.length} transaction(s)...`;
+  try {
+    const res = await fetch('/analyze/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tx_ids })
+    });
+    if (!res.ok) throw new Error('Request failed: ' + res.status);
+    const results = await res.json();
+    render(results);
+    statusEl.textContent = `Done — ${results.length} result(s).`;
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  } finally {
+    analyzeBtn.disabled = false;
+  }
+}
+
+async function loadSample() {
+  sampleBtn.disabled = true;
+  statusEl.textContent = 'Loading sample IDs...';
+  try {
+    const res = await fetch('/sample?n=20');
+    const data = await res.json();
+    idsEl.value = data.tx_ids.join(', ');
+    statusEl.textContent = 'Loaded 20 sample IDs (mix of known illicit and licit). Click Analyze.';
+  } catch (err) {
+    statusEl.textContent = 'Error loading sample: ' + err.message;
+  } finally {
+    sampleBtn.disabled = false;
+  }
+}
+
+analyzeBtn.addEventListener('click', analyze);
+sampleBtn.addEventListener('click', loadSample);
+</script>
+</body>
+</html>
