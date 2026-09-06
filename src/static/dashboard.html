@@ -244,6 +244,16 @@ function renderResults(data) {
     </tr>
   `).join('');
 
+  const cv = data.cross_validation;
+  const cvRows = cv.models.map(m => `
+    <tr>
+      <td class="model-name">${m.name}</td>
+      <td class="mono">${m.precision_mean.toFixed(3)} &plusmn; ${m.precision_std.toFixed(3)}</td>
+      <td class="mono">${m.recall_mean.toFixed(3)} &plusmn; ${m.recall_std.toFixed(3)}</td>
+      <td class="mono">${m.f1_mean.toFixed(3)} &plusmn; ${m.f1_std.toFixed(3)}</td>
+    </tr>
+  `).join('');
+
   resultsArea.innerHTML = `
     <table>
       <thead>
@@ -255,6 +265,15 @@ function renderResults(data) {
       Test set: ${data.test_set.total.toLocaleString()} transactions (${data.test_set.illicit.toLocaleString()} illicit), timesteps 35-49, held out from training.<br><br>
       ${data.note}
     </div>
+
+    <div class="section-title" style="margin-top:20px">Robustness: walk-forward cross-validation (mean &plusmn; std across 4 time splits)</div>
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Precision (illicit)</th><th>Recall (illicit)</th><th>F1 (illicit)</th></tr>
+      </thead>
+      <tbody>${cvRows}</tbody>
+    </table>
+    <div class="note-box">${cv.note}</div>
   `;
 }
 

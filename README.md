@@ -28,6 +28,11 @@ used in published anti-money-laundering research).
    graph summary statistics - a 2-layer network (100 hidden units) over the raw 165 features,
    propagated through a symmetric-normalized adjacency matrix (Kipf & Welling, 2017), trained
    transductively over the full graph with loss/evaluation restricted to labeled nodes
+7. Built a hybrid model (`src/train_hybrid.py`) that extracts the GCN's hidden-layer embeddings and
+   feeds them into XGBoost alongside the raw and hand-engineered features, testing whether a learned
+   representation and hand-crafted statistics are complementary rather than redundant
+8. Ran walk-forward cross-validation (`src/cross_validate.py`) across 4 time-based splits for the
+   baseline and graph-augmented models, to check whether the single-split result generalizes
 
 ## Results
 Time-based split: trained on timesteps 1-34, tested on timesteps 35-49 (16,670 test transactions, 1,083 illicit).
@@ -37,6 +42,7 @@ Time-based split: trained on timesteps 1-34, tested on timesteps 35-49 (16,670 t
 | Baseline (raw features, XGBoost) | 0.90 | 0.73 | 0.80 |
 | Graph-augmented (raw + hand features, XGBoost) | 0.95 | 0.73 | 0.82 |
 | GCN (raw features + learned graph structure) | 0.62 | 0.62 | 0.62 |
+| Hybrid (raw + hand features + GCN embeddings, XGBoost) | 0.97 | 0.70 | 0.81 |
 
 Hand-engineered graph features raised precision on the illicit class by 5 points over the baseline at
 the same recall, i.e. fewer false positives on flagged transactions, without catching more or fewer of
@@ -57,6 +63,38 @@ for the "just add a GNN" hypothesis, not a bug - the take-away isn't "GNNs are b
 GNN doesn't automatically beat a well-featured tree model without more architectural work (attention,
 temporal structure, tuning) than this project implements."
 
+**The hybrid model is not a clean win, and reporting it as one would be dishonest.** Adding the GCN's
+learned embeddings on top of the hand-engineered features pushed precision to the highest of any model
+(0.97) but recall dropped to 0.70 (from 0.73), landing F1 at 0.81 - essentially tied with, not better
+than, the graph-augmented model's 0.82. The correct reading is that the GCN's embeddings shifted the
+precision/recall tradeoff rather than adding clean predictive signal on top of what the hand-engineered
+features already captured: with 269 features and only ~30K training rows, XGBoost likely has less to
+gain from 100 more (correlated, since they come from the same underlying graph) dimensions than from a
+qualitatively different signal. This is itself a useful finding - concatenating a representation from a
+weaker model onto a stronger model's inputs is not guaranteed to help, and didn't here.
+
+### Robustness: walk-forward cross-validation
+A single train/test split can't distinguish a real effect from a lucky cut. `src/cross_validate.py`
+re-runs the baseline and graph-augmented models across 4 time-based splits (train up to timestep 26,
+30, 34, or 38; test on everything after) and reports mean ± std:
+
+| Model | Precision (illicit) | Recall (illicit) | F1 (illicit) |
+|---|---|---|---|
+| Baseline | 0.914 ± 0.025 | 0.726 ± 0.060 | 0.807 ± 0.033 |
+| Graph-augmented | 0.945 ± 0.012 | 0.725 ± 0.052 | 0.819 ± 0.030 |
+
+The graph-augmented model's precision advantage holds at **every one of the 4 splits**, not just the
+one originally reported, and its precision variance (±0.012) is roughly half the baseline's (±0.025) -
+the hand-engineered graph features make the model's precision both better and more stable across time,
+which is a stronger and more defensible claim than a single-split result alone would support.
+
+**Scope note**: this cross-validation deliberately excludes the GCN and hybrid models. Both depend on a
+GCN trained once, using labels only from timestep ≤34. Reusing that same frozen GCN/embeddings for a CV
+split whose test portion overlaps timestep ≤34 (e.g. the ≤26 or ≤30 splits) would leak labels the GCN
+was fit on into what's being called a "test" set. Properly cross-validating the GCN would mean
+retraining it from scratch per split (each run takes several minutes on CPU) - a real cost, left as
+future work rather than done incorrectly here.
+
 ## Limitations
 - Cycle detection found **zero cycles in every one of the 49 timesteps**. This isn't a bug: Bitcoin's
   UTXO model makes the transaction graph a directed acyclic graph by construction (an output can't be
@@ -72,9 +110,10 @@ A temporal graph neural network (e.g. EvolveGCN, which Elliptic was originally d
 or a GCN with attention such as GAT) could likely close the gap seen here and surpass the XGBoost
 models, since the plain GCN in this project has no mechanism for modeling how the graph evolves across
 timesteps. Other directions: per-timestep community detection (this project ran it on the whole graph
-at once), exact rather than sampled betweenness centrality, and hyperparameter tuning for all three
-models (none were tuned beyond library defaults, so this comparison reflects architecture choice, not
-maximum achievable performance for any of them).
+at once), exact rather than sampled betweenness centrality, hyperparameter tuning for all models (none
+were tuned beyond library defaults, so this comparison reflects architecture choice, not maximum
+achievable performance for any of them), and extending walk-forward cross-validation to the GCN and
+hybrid models by retraining the GCN per split instead of reusing one frozen copy.
 
 ## Running it
 ```
@@ -86,6 +125,8 @@ python src\community_detection.py
 python src\centrality.py
 python src\train_model.py
 python src\train_gnn.py
+python src\train_hybrid.py
+python src\cross_validate.py
 uvicorn src.api:app --reload
 ```
 Then open `http://127.0.0.1:8000/docs` for the interactive API, or `GET /analyze/{tx_id}` for a JSON risk score.

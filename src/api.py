@@ -84,6 +84,11 @@ RESULTS = {
             "name": "GCN",
             "description": "Raw features + learned graph structure (2-layer Graph Convolutional Network, no hand-engineered features)",
             "precision": 0.62, "recall": 0.62, "f1": 0.62
+        },
+        {
+            "name": "Hybrid",
+            "description": "Raw + hand-engineered features + GCN hidden-layer embeddings, XGBoost",
+            "precision": 0.97, "recall": 0.70, "f1": 0.81
         }
     ],
     "note": (
@@ -92,8 +97,31 @@ RESULTS = {
         "Random Forest with hand-engineered features. Likely causes: no temporal modeling "
         "(the graph evolves over 49 timesteps and this GCN has no notion of time), a plain "
         "2-layer architecture with no attention, and no hyperparameter tuning on any of the "
-        "three models."
-    )
+        "models. The Hybrid model (adding the GCN's embeddings on top of the hand-engineered "
+        "features) is not a clean win either: it reaches the highest precision of any model "
+        "(0.97) but recall drops to 0.70, landing F1 at 0.81 - essentially tied with, not "
+        "better than, the graph-augmented model. Concatenating a weaker model's learned "
+        "representation onto a stronger model's inputs shifted the precision/recall tradeoff "
+        "rather than adding clean predictive signal."
+    ),
+    "cross_validation": {
+        "description": "Walk-forward CV across 4 time-based splits (train <= timestep 26/30/34/38, test on the rest), for the two models that don't depend on a GCN pretrained on a fixed label split.",
+        "models": [
+            {"name": "Baseline", "precision_mean": 0.914, "precision_std": 0.025,
+             "recall_mean": 0.726, "recall_std": 0.060, "f1_mean": 0.807, "f1_std": 0.033},
+            {"name": "Graph-augmented", "precision_mean": 0.945, "precision_std": 0.012,
+             "recall_mean": 0.725, "recall_std": 0.052, "f1_mean": 0.819, "f1_std": 0.030}
+        ],
+        "note": (
+            "Graph-augmented's precision advantage over baseline held at every one of the 4 "
+            "splits, and its precision variance (+/-0.012) is roughly half the baseline's "
+            "(+/-0.025) - the hand-engineered graph features make precision both better and "
+            "more stable across time, not just better on one lucky split. GCN and Hybrid are "
+            "excluded here because both depend on a GCN trained once using labels from "
+            "timestep <=34 only; reusing it for a CV split whose test set overlaps that range "
+            "would leak labels into the test set."
+        )
+    }
 }
 
 
