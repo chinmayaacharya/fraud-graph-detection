@@ -22,18 +22,40 @@ used in published anti-money-laundering research).
 2. Detected short cycles (2-4 hops) per timestep, flagging potential layering patterns
 3. Ran Louvain community detection to identify tightly-connected wallet clusters
 4. Computed degree and betweenness centrality to flag "mixer"-like addresses
-5. Trained an XGBoost classifier comparing baseline features vs. graph-augmented features
+5. Trained an XGBoost classifier comparing baseline features vs. graph-augmented (hand-engineered) features
+6. Trained a Graph Convolutional Network (GCN, `src/train_gnn.py`) that learns a representation of
+   each transaction directly from graph structure via message passing, instead of using hand-picked
+   graph summary statistics - a 2-layer network (100 hidden units) over the raw 165 features,
+   propagated through a symmetric-normalized adjacency matrix (Kipf & Welling, 2017), trained
+   transductively over the full graph with loss/evaluation restricted to labeled nodes
 
 ## Results
 Time-based split: trained on timesteps 1-34, tested on timesteps 35-49 (16,670 test transactions, 1,083 illicit).
 
 | Model | Precision (illicit) | Recall (illicit) | F1 (illicit) |
 |---|---|---|---|
-| Baseline | 0.90 | 0.73 | 0.80 |
-| Graph-augmented | 0.95 | 0.73 | 0.82 |
+| Baseline (raw features, XGBoost) | 0.90 | 0.73 | 0.80 |
+| Graph-augmented (raw + hand features, XGBoost) | 0.95 | 0.73 | 0.82 |
+| GCN (raw features + learned graph structure) | 0.62 | 0.62 | 0.62 |
 
-Graph features raised precision on the illicit class by 5 points at the same recall, i.e. fewer false
-positives on flagged transactions, without catching more or fewer of the actual illicit ones.
+Hand-engineered graph features raised precision on the illicit class by 5 points over the baseline at
+the same recall, i.e. fewer false positives on flagged transactions, without catching more or fewer of
+the actual illicit ones.
+
+The GCN, despite having access to the full graph structure and learning its own representations rather
+than relying on 4 hand-picked numbers, **underperforms both XGBoost models**. This matches the original
+Elliptic benchmark paper (Weber et al., 2019, "Anti-Money Laundering in Bitcoin: Experimenting with
+Graph Convolutional Networks for Financial Forensics"), where a similarly simple GCN was likewise beaten
+by a Random Forest using hand-engineered features on this same dataset. The likely reasons, consistent
+with that paper's own discussion: (1) a plain 2-layer GCN with mean-field message passing dilutes a
+node's own signal by averaging it with many neighbors, which hurts on a graph with highly variable node
+degree; (2) it has no notion of time, while transaction semantics are inherently temporal (this is
+exactly the gap EvolveGCN, a follow-up to that paper, was built to close); (3) tree ensembles like
+XGBoost handle this dataset's class imbalance and feature scale variation more gracefully out of the box
+than a shallow GCN trained with a single global class-weighted loss. This is a genuine negative result
+for the "just add a GNN" hypothesis, not a bug - the take-away isn't "GNNs are bad," it's "a bare-bones
+GNN doesn't automatically beat a well-featured tree model without more architectural work (attention,
+temporal structure, tuning) than this project implements."
 
 ## Limitations
 - Cycle detection found **zero cycles in every one of the 49 timesteps**. This isn't a bug: Bitcoin's
@@ -46,9 +68,13 @@ positives on flagged transactions, without catching more or fewer of the actual 
 - Betweenness centrality sampled (k=500) rather than exact, for performance.
 
 ## Future work
-A graph neural network (e.g., EvolveGCN, which Elliptic was originally designed to
-benchmark) could likely improve on these results by learning graph structure
-end-to-end rather than using hand-engineered graph features.
+A temporal graph neural network (e.g. EvolveGCN, which Elliptic was originally designed to benchmark,
+or a GCN with attention such as GAT) could likely close the gap seen here and surpass the XGBoost
+models, since the plain GCN in this project has no mechanism for modeling how the graph evolves across
+timesteps. Other directions: per-timestep community detection (this project ran it on the whole graph
+at once), exact rather than sampled betweenness centrality, and hyperparameter tuning for all three
+models (none were tuned beyond library defaults, so this comparison reflects architecture choice, not
+maximum achievable performance for any of them).
 
 ## Running it
 ```
@@ -59,6 +85,7 @@ python src\cycle_detection.py
 python src\community_detection.py
 python src\centrality.py
 python src\train_model.py
+python src\train_gnn.py
 uvicorn src.api:app --reload
 ```
 Then open `http://127.0.0.1:8000/docs` for the interactive API, or `GET /analyze/{tx_id}` for a JSON risk score.
