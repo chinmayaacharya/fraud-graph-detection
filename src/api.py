@@ -46,6 +46,6 @@ def analyze(tx_id: int):
         "risk_score": float(risk_score),
         "flags": {
             "in_cycle": bool(in_cycle),
-            "high_risk_community": community_ratio > 0.3
+            "high_risk_community": bool(community_ratio > 0.3)
         }
     }
