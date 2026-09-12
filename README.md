@@ -34,59 +34,91 @@ used in published anti-money-laundering research).
 8. Ran walk-forward cross-validation (`src/cross_validate.py`) across 4 time-based splits for the
    baseline and graph-augmented models, to check whether the single-split result generalizes
 
-## Results
+## Methodology fix: label leakage in `community_illicit_ratio` (caught in code review)
+
+An earlier version of this project computed `community_illicit_ratio` (each wallet cluster's fraction
+of *known* illicit members) from **all** labeled transactions regardless of timestep. Since that ratio
+is used as a feature for both training and test rows, this meant a test-period transaction's own
+feature value was partly derived from test-period labels — including, for some rows, its own label —
+and every walk-forward CV fold reused the same globally-computed ratio, so the leakage was identical
+and undetected at every fold. This is exactly the kind of bug that produces a stable-looking, confident,
+*wrong* result: the original numbers below (0.90 → 0.95 precision, holding at every CV split) looked
+like solid evidence, and were actually measuring a model that had partial access to the answer key.
+
+**The fix**: `community_illicit_ratio` is now computed only from labels with `timestep <= 34` (the
+training cutoff) in `community_detection.py`, and `cross_validate.py` recomputes it fresh, per fold,
+from only that fold's training-period labels (community *membership* — which cluster a node is in — is
+pure graph structure with no label involved, so that part was never affected and is reused as-is).
+`in_cycle` and centrality were never affected either: `in_cycle` is a static structural check with no
+labels involved, and both centrality measures (`centrality.py`) are computed from graph connectivity
+alone, using no label information at all - full-graph centrality is a defensible design choice about
+*structure*, not a leakage risk.
+
+**What changed once this was fixed:**
+
+| Model | Precision (before fix) | Precision (after fix) | F1 (before) | F1 (after) |
+|---|---|---|---|---|
+| Baseline | 0.90 | 0.90 (unchanged - never used this feature) | 0.80 | 0.80 |
+| Graph-augmented | 0.95 | **0.99** | 0.82 | **0.77** |
+| Hybrid | 0.97 | **0.99** | 0.81 | **0.76** |
+
+The leak didn't just inflate a number - it flipped the conclusion. Precision went *up* after the fix
+(the leaked feature had actually been acting as noise diluting an otherwise very strong precision
+signal), but recall collapsed (0.73 → 0.63 for graph-augmented), and **F1 for both graph-feature models
+is now worse than the baseline's**, not better. The honest finding is the opposite of what was
+originally reported: on this dataset, with this feature set, adding hand-engineered graph features
+trades a large amount of recall for a small amount of precision and nets a worse F1 than raw features
+alone.
+
+## Results (corrected)
 Time-based split: trained on timesteps 1-34, tested on timesteps 35-49 (16,670 test transactions, 1,083 illicit).
 
 | Model | Precision (illicit) | Recall (illicit) | F1 (illicit) |
 |---|---|---|---|
-| Baseline (raw features, XGBoost) | 0.90 | 0.73 | 0.80 |
-| Graph-augmented (raw + hand features, XGBoost) | 0.95 | 0.73 | 0.82 |
+| **Baseline (raw features, XGBoost)** | 0.90 | 0.73 | **0.80** |
+| Graph-augmented (raw + hand features, XGBoost) | 0.99 | 0.63 | 0.77 |
 | GCN (raw features + learned graph structure) | 0.62 | 0.62 | 0.62 |
-| Hybrid (raw + hand features + GCN embeddings, XGBoost) | 0.97 | 0.70 | 0.81 |
+| Hybrid (raw + hand features + GCN embeddings, XGBoost) | 0.99 | 0.62 | 0.76 |
 
-Hand-engineered graph features raised precision on the illicit class by 5 points over the baseline at
-the same recall, i.e. fewer false positives on flagged transactions, without catching more or fewer of
-the actual illicit ones.
+**The baseline now has the best F1 of the three XGBoost variants.** Both graph-feature models push
+precision to near-perfect (0.99) - almost every transaction they flag as illicit really is - but at the
+cost of missing over a third of actual illicit transactions that the baseline would have caught. Whether
+that tradeoff is "better" depends entirely on the deployment context (a triage queue with limited
+investigator time might genuinely prefer very-high-precision-lower-recall; a system trying to catch as
+much laundering as possible would not), but it is **not** the free, no-tradeoff improvement the
+pre-fix numbers suggested, and reporting it as one would be wrong.
 
-The GCN, despite having access to the full graph structure and learning its own representations rather
-than relying on 4 hand-picked numbers, **underperforms both XGBoost models**. This matches the original
-Elliptic benchmark paper (Weber et al., 2019, "Anti-Money Laundering in Bitcoin: Experimenting with
-Graph Convolutional Networks for Financial Forensics"), where a similarly simple GCN was likewise beaten
-by a Random Forest using hand-engineered features on this same dataset. The likely reasons, consistent
-with that paper's own discussion: (1) a plain 2-layer GCN with mean-field message passing dilutes a
-node's own signal by averaging it with many neighbors, which hurts on a graph with highly variable node
-degree; (2) it has no notion of time, while transaction semantics are inherently temporal (this is
-exactly the gap EvolveGCN, a follow-up to that paper, was built to close); (3) tree ensembles like
-XGBoost handle this dataset's class imbalance and feature scale variation more gracefully out of the box
-than a shallow GCN trained with a single global class-weighted loss. This is a genuine negative result
-for the "just add a GNN" hypothesis, not a bug - the take-away isn't "GNNs are bad," it's "a bare-bones
-GNN doesn't automatically beat a well-featured tree model without more architectural work (attention,
-temporal structure, tuning) than this project implements."
+The GCN remains the weakest standalone model (0.62/0.62/0.62), unaffected by this bug since it never
+used `community_illicit_ratio` or any hand-engineered feature - it only ever saw raw features and graph
+structure. This matches the original Elliptic benchmark paper (Weber et al., 2019, "Anti-Money
+Laundering in Bitcoin: Experimenting with Graph Convolutional Networks for Financial Forensics"), where
+a similarly simple GCN was likewise beaten by a Random Forest using hand-engineered features on this
+same dataset. Likely reasons, consistent with that paper's discussion: (1) a plain 2-layer GCN with
+mean-field message passing dilutes a node's own signal by averaging it with many neighbors; (2) it has
+no notion of time, while transaction semantics are inherently temporal (the gap EvolveGCN was built to
+close); (3) tree ensembles handle this dataset's class imbalance more gracefully out of the box than a
+shallow GCN with a single global class-weighted loss.
 
-**The hybrid model is not a clean win, and reporting it as one would be dishonest.** Adding the GCN's
-learned embeddings on top of the hand-engineered features pushed precision to the highest of any model
-(0.97) but recall dropped to 0.70 (from 0.73), landing F1 at 0.81 - essentially tied with, not better
-than, the graph-augmented model's 0.82. The correct reading is that the GCN's embeddings shifted the
-precision/recall tradeoff rather than adding clean predictive signal on top of what the hand-engineered
-features already captured: with 269 features and only ~30K training rows, XGBoost likely has less to
-gain from 100 more (correlated, since they come from the same underlying graph) dimensions than from a
-qualitatively different signal. This is itself a useful finding - concatenating a representation from a
-weaker model onto a stronger model's inputs is not guaranteed to help, and didn't here.
+The hybrid model (GCN embeddings + hand features + raw features) shows the same precision/recall
+tradeoff as graph-augmented, slightly worse on both - concatenating the GCN's embeddings on top of an
+already-leaky feature set didn't fix or meaningfully change the underlying problem.
 
-### Robustness: walk-forward cross-validation
-A single train/test split can't distinguish a real effect from a lucky cut. `src/cross_validate.py`
-re-runs the baseline and graph-augmented models across 4 time-based splits (train up to timestep 26,
-30, 34, or 38; test on everything after) and reports mean ± std:
+### Robustness: walk-forward cross-validation (corrected)
+`src/cross_validate.py` re-runs the baseline and graph-augmented models across 4 time-based splits
+(train up to timestep 26, 30, 34, or 38; test on everything after), recomputing
+`community_illicit_ratio` fresh per fold from that fold's training labels only:
 
 | Model | Precision (illicit) | Recall (illicit) | F1 (illicit) |
 |---|---|---|---|
-| Baseline | 0.914 ± 0.025 | 0.726 ± 0.060 | 0.807 ± 0.033 |
-| Graph-augmented | 0.945 ± 0.012 | 0.725 ± 0.052 | 0.819 ± 0.030 |
+| **Baseline** | 0.914 ± 0.025 | 0.726 ± 0.060 | **0.807 ± 0.033** |
+| Graph-augmented | 0.988 ± 0.004 | 0.597 ± 0.038 | 0.743 ± 0.030 |
 
-The graph-augmented model's precision advantage holds at **every one of the 4 splits**, not just the
-one originally reported, and its precision variance (±0.012) is roughly half the baseline's (±0.025) -
-the hand-engineered graph features make the model's precision both better and more stable across time,
-which is a stronger and more defensible claim than a single-split result alone would support.
+This is the same story, now confirmed as *consistent*, not a one-split artifact: graph-augmented loses
+to baseline on F1 at **every one of the 4 splits** (0.759 vs 0.849, 0.751 vs 0.819, 0.771 vs 0.804, 0.692
+vs 0.757), while its precision is both higher and far more stable (±0.004 vs baseline's ±0.025). The
+walk-forward CV doesn't rescue the graph-augmented model's F1 - it confirms the tradeoff is real and
+reproducible, which is exactly what cross-validation is for: distinguishing a genuine, repeatable effect
+(here, the precision/recall tradeoff) from a lucky single split.
 
 **Scope note**: this cross-validation deliberately excludes the GCN and hybrid models. Both depend on a
 GCN trained once, using labels only from timestep ≤34. Reusing that same frozen GCN/embeddings for a CV
@@ -100,20 +132,41 @@ future work rather than done incorrectly here.
   UTXO model makes the transaction graph a directed acyclic graph by construction (an output can't be
   spent before the transaction that creates it exists), so short-cycle detection as a layering signal
   doesn't apply to this dataset's structure. The `in_cycle` feature is therefore constant (always 0) and
-  contributes nothing to the graph-augmented model — the precision gain above comes from the community
-  and centrality features instead.
+  contributes nothing to any model.
 - Louvain community detection was run on the graph as a whole (not per-timestep) and found 312 communities.
+  Community *membership* uses no label information (Louvain only looks at graph connectivity) - only the
+  per-community illicit *ratio* uses labels, and that computation is now restricted to training-period
+  labels only, per the Methodology fix above.
+- **Centrality (degree and betweenness) is computed from the full graph's structure, across all
+  timesteps, using no label information whatsoever** - stated explicitly here because it's the one
+  hand-engineered feature that touches "future" graph structure (edges from timesteps after the training
+  cutoff), unlike the label-based community ratio. This is a defensible design choice, not a leakage bug:
+  in a real deployment, the transaction graph's topology (who has transacted with whom) is observable
+  as it forms, and using the fuller graph for structural measures like centrality is standard practice
+  in this literature - but it is a real assumption worth being explicit about, since it means centrality
+  values for training-period nodes are informed by connections that hadn't happened yet at that time.
 - Betweenness centrality sampled (k=500) rather than exact, for performance.
 
 ## Future work
-A temporal graph neural network (e.g. EvolveGCN, which Elliptic was originally designed to benchmark,
-or a GCN with attention such as GAT) could likely close the gap seen here and surpass the XGBoost
-models, since the plain GCN in this project has no mechanism for modeling how the graph evolves across
-timesteps. Other directions: per-timestep community detection (this project ran it on the whole graph
-at once), exact rather than sampled betweenness centrality, hyperparameter tuning for all models (none
-were tuned beyond library defaults, so this comparison reflects architecture choice, not maximum
-achievable performance for any of them), and extending walk-forward cross-validation to the GCN and
-hybrid models by retraining the GCN per split instead of reusing one frozen copy.
+- **Why does the community feature trade recall for precision so sharply?** Now that the leak is fixed,
+  this is the actual open question this project raises: the corrected `community_illicit_ratio` is a
+  much sparser, more conservative signal (only training-period labels contribute), and XGBoost appears
+  to use it as a strong "veto" - understandable given the earlier version's high scores were partly an
+  artifact, but worth investigating directly (e.g. feature-importance/SHAP analysis on the corrected
+  model) rather than left as a hypothesis.
+- **Class-weighting consistency**: the GCN training explicitly upweights the illicit class
+  (`class_weights` in `train_gnn.py`) to counter the ~10:1 imbalance, but the XGBoost models here rely
+  on defaults with no equivalent (e.g. `scale_pos_weight`). Adding it would make the three approaches
+  more methodologically comparable, and might independently affect the precision/recall tradeoff
+  reported above - deliberately left undone in this fix so the leak's effect could be isolated cleanly
+  from any other change, but a natural next experiment.
+- A temporal graph neural network (e.g. EvolveGCN, which Elliptic was originally designed to benchmark,
+  or a GCN with attention such as GAT) could still improve on the GCN's standalone results, since it has
+  no mechanism for modeling how the graph evolves across timesteps.
+- Other directions: per-timestep community detection (this project ran it on the whole graph at once),
+  exact rather than sampled betweenness centrality, hyperparameter tuning for all models (none were
+  tuned beyond library defaults), and extending walk-forward cross-validation to the GCN and hybrid
+  models by retraining the GCN per split instead of reusing one frozen copy.
 
 ## Running it
 ```

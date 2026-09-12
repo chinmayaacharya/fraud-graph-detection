@@ -4,10 +4,20 @@ Walk-forward cross-validation across multiple time-based splits.
 train_model.py reports a single train/test split (timestep <=34 / >34).
 A single split can't tell you whether that result was a lucky cut or a
 robust pattern, which matters for any claim made from it. This script
-re-runs the baseline and graph-augmented XGBoost models across 3
+re-runs the baseline and graph-augmented XGBoost models across 4
 different time-based splits (walk-forward validation - the correct
 analog of k-fold CV for temporally ordered data, where a random shuffle
 would leak future information) and reports mean +/- std for each metric.
+
+IMPORTANT: community_illicit_ratio is recomputed FRESH inside the loop,
+per split, using only that split's training-period labels. Earlier
+versions of this script (and of community_detection.py) computed it once
+from ALL labels regardless of timestep, which leaked test-period labels
+(including, for some rows, a labeled node's own label) into a feature
+used for both training and evaluation - a real bug caught in review. See
+the README's "Methodology fix" note for the full story and the before/
+after numbers. tx_to_community (which cluster a node is in) depends only
+on graph structure, not labels, so it's safe to reuse across every split.
 
 Scope note: this deliberately excludes the GCN and hybrid models. Both
 depend on a GCN that was trained once, using labels from timestep <=34
@@ -39,12 +49,19 @@ with open('data/community_data.pkl', 'rb') as f:
 with open('data/centrality_data.pkl', 'rb') as f:
     centrality_data = pickle.load(f)
 
+tx_to_community = community_data['tx_to_community']
+
+# All labeled transactions with their timestep and community, used to
+# recompute community_illicit_ratio fresh for each fold below.
+labeled = classes[classes['class'] != 'unknown'].copy()
+labeled['class'] = labeled['class'].map({'1': 1, '2': 0}).astype(int)
+labeled = labeled.merge(features[['txId', 'timestep']], on='txId', how='left')
+labeled['community'] = labeled['txId'].map(tx_to_community)
+
 df['in_cycle'] = df['txId'].apply(lambda x: 1 if x in cycle_flags else 0)
-df['community_illicit_ratio'] = df['txId'].apply(
-    lambda x: community_data['community_illicit_ratio'].get(
-        community_data['tx_to_community'].get(x, -1), 0.0))
 df['degree_centrality'] = df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0))
 df['betweenness_centrality'] = df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0))
+df['community'] = df['txId'].map(tx_to_community)
 
 feat_cols = [c for c in df.columns if c.startswith('feat_')]
 graph_cols = ['in_cycle', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
@@ -56,6 +73,12 @@ results = {"baseline": {"precision": [], "recall": [], "f1": []},
            "graph_augmented": {"precision": [], "recall": [], "f1": []}}
 
 for cutoff in SPLITS:
+    # Recompute the community illicit ratio using ONLY this fold's
+    # training-period labels - this is the fix for the leakage bug.
+    train_labels = labeled[labeled['timestep'] <= cutoff]
+    ratio_by_community = train_labels.groupby('community')['class'].mean().to_dict()
+    df['community_illicit_ratio'] = df['community'].map(ratio_by_community).fillna(0.0)
+
     train = df[df['timestep'] <= cutoff]
     test = df[df['timestep'] > cutoff]
     y_train, y_test = train['class'], test['class']
