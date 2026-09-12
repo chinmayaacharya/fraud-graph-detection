@@ -33,16 +33,23 @@ def score_tx(tx_id: int):
     if row.empty:
         return {"tx_id": tx_id, "error": "Transaction ID not found"}
 
-    row_features = row[feat_cols].values[0].tolist()
-
     in_cycle = 1 if tx_id in cycle_flags else 0
     community_ratio = community_data['community_illicit_ratio'].get(
         community_data['tx_to_community'].get(tx_id, -1), 0.0)
     degree = centrality_data['degree'].get(tx_id, 0.0)
     betweenness = centrality_data['betweenness'].get(tx_id, 0.0)
 
-    full_features = [row_features + [in_cycle, community_ratio, degree, betweenness]]
-    risk_score = model.predict_proba(full_features)[0][1]
+    # Build a one-row DataFrame with the same column names/order train_model.py
+    # used, rather than a raw list - the model was fit on named columns, and a
+    # positional list is one accidental reorder away from silently wrong
+    # predictions with no warning.
+    row_input = row[feat_cols].copy()
+    row_input['in_cycle'] = in_cycle
+    row_input['community_illicit_ratio'] = community_ratio
+    row_input['degree_centrality'] = degree
+    row_input['betweenness_centrality'] = betweenness
+
+    risk_score = model.predict_proba(row_input)[0][1]
 
     return {
         "tx_id": tx_id,
@@ -64,9 +71,18 @@ def root():
     return {"message": "Fraud Risk Scoring API. Try /analyze/{tx_id}"}
 
 
-# Results from the offline train/test runs (train_model.py, train_gnn.py) -
-# time-based split, timesteps 1-34 train / 35-49 test. Not recomputed at
-# request time; update these if the models are retrained with changes.
+# Results from the offline train/test runs (train_model.py, train_gnn.py,
+# train_hybrid.py, cross_validate.py) - time-based split, timesteps 1-34
+# train / 35-49 test. Not recomputed at request time; update these if the
+# models are retrained with changes.
+#
+# CORRECTED numbers as of the community_illicit_ratio leakage fix (see
+# README's "Methodology fix" section): the original version of this feature
+# was computed from ALL labels regardless of timestep, leaking test-period
+# labels into a feature used for both train and test rows. Fixed in
+# community_detection.py / cross_validate.py to use training-period labels
+# only. The corrected numbers REVERSE the original conclusion: baseline now
+# has the best F1, not the graph-augmented model.
 RESULTS = {
     "test_set": {"total": 16670, "illicit": 1083},
     "models": [
@@ -78,7 +94,7 @@ RESULTS = {
         {
             "name": "Graph-augmented",
             "description": "Raw features + hand-engineered graph features (cycle flag, community illicit ratio, degree/betweenness centrality), XGBoost",
-            "precision": 0.95, "recall": 0.73, "f1": 0.82
+            "precision": 0.99, "recall": 0.63, "f1": 0.77
         },
         {
             "name": "GCN",
@@ -88,38 +104,37 @@ RESULTS = {
         {
             "name": "Hybrid",
             "description": "Raw + hand-engineered features + GCN hidden-layer embeddings, XGBoost",
-            "precision": 0.97, "recall": 0.70, "f1": 0.81
+            "precision": 0.99, "recall": 0.62, "f1": 0.76
         }
     ],
     "note": (
-        "The GCN underperforms both XGBoost models, consistent with the original Elliptic "
-        "benchmark paper (Weber et al., 2019), where a similarly simple GCN also lost to a "
-        "Random Forest with hand-engineered features. Likely causes: no temporal modeling "
-        "(the graph evolves over 49 timesteps and this GCN has no notion of time), a plain "
-        "2-layer architecture with no attention, and no hyperparameter tuning on any of the "
-        "models. The Hybrid model (adding the GCN's embeddings on top of the hand-engineered "
-        "features) is not a clean win either: it reaches the highest precision of any model "
-        "(0.97) but recall drops to 0.70, landing F1 at 0.81 - essentially tied with, not "
-        "better than, the graph-augmented model. Concatenating a weaker model's learned "
-        "representation onto a stronger model's inputs shifted the precision/recall tradeoff "
-        "rather than adding clean predictive signal."
+        "CORRECTED after fixing a label-leakage bug in community_illicit_ratio (see README). "
+        "The baseline now has the BEST F1 of the three XGBoost variants - the graph-augmented "
+        "and hybrid models push precision to near-perfect (0.99) but recall collapses to "
+        "~0.62-0.63, netting a worse F1 than raw features alone. This reverses the original "
+        "(leaky) finding that graph features were a clean improvement. The GCN was never "
+        "affected by this bug (it uses no hand-engineered features) and remains the weakest "
+        "standalone model, consistent with the original Elliptic benchmark paper (Weber et "
+        "al., 2019), where a similarly simple GCN also lost to a Random Forest with "
+        "hand-engineered features. Likely GCN causes: no temporal modeling, a plain 2-layer "
+        "architecture with no attention, and no hyperparameter tuning on any model here."
     ),
     "cross_validation": {
-        "description": "Walk-forward CV across 4 time-based splits (train <= timestep 26/30/34/38, test on the rest), for the two models that don't depend on a GCN pretrained on a fixed label split.",
+        "description": "Walk-forward CV across 4 time-based splits (train <= timestep 26/30/34/38, test on the rest), for the two models that don't depend on a GCN pretrained on a fixed label split. community_illicit_ratio is recomputed fresh per fold from that fold's training labels only.",
         "models": [
             {"name": "Baseline", "precision_mean": 0.914, "precision_std": 0.025,
              "recall_mean": 0.726, "recall_std": 0.060, "f1_mean": 0.807, "f1_std": 0.033},
-            {"name": "Graph-augmented", "precision_mean": 0.945, "precision_std": 0.012,
-             "recall_mean": 0.725, "recall_std": 0.052, "f1_mean": 0.819, "f1_std": 0.030}
+            {"name": "Graph-augmented", "precision_mean": 0.988, "precision_std": 0.004,
+             "recall_mean": 0.597, "recall_std": 0.038, "f1_mean": 0.743, "f1_std": 0.030}
         ],
         "note": (
-            "Graph-augmented's precision advantage over baseline held at every one of the 4 "
-            "splits, and its precision variance (+/-0.012) is roughly half the baseline's "
-            "(+/-0.025) - the hand-engineered graph features make precision both better and "
-            "more stable across time, not just better on one lucky split. GCN and Hybrid are "
-            "excluded here because both depend on a GCN trained once using labels from "
-            "timestep <=34 only; reusing it for a CV split whose test set overlaps that range "
-            "would leak labels into the test set."
+            "CORRECTED: graph-augmented now loses to baseline on F1 at every one of the 4 "
+            "splits (not just on average) - this isn't a lucky single split, it's a consistent "
+            "precision/recall tradeoff. Graph-augmented's precision is both higher and far more "
+            "stable (+/-0.004 vs baseline's +/-0.025), but that stability doesn't translate into "
+            "a better F1. GCN and Hybrid are excluded here because both depend on a GCN trained "
+            "once using labels from timestep <=34 only; reusing it for a CV split whose test set "
+            "overlaps that range would leak labels into the test set."
         )
     }
 }
