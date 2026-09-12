@@ -24,7 +24,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from xgboost import XGBClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, average_precision_score
+
+from results_io import upsert_model
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -91,14 +93,14 @@ df = df.merge(emb_df, on='txId', how='left')
 df = df[df['class'] != 'unknown'].copy()
 df['class'] = df['class'].map({'1': 1, '2': 0})
 
-with open('data/cycle_flags.pkl', 'rb') as f:
-    cycle_flags = pickle.load(f)
+with open('data/fan_ratio.pkl', 'rb') as f:
+    fan_ratio = pickle.load(f)
 with open('data/community_data.pkl', 'rb') as f:
     community_data = pickle.load(f)
 with open('data/centrality_data.pkl', 'rb') as f:
     centrality_data = pickle.load(f)
 
-df['in_cycle'] = df['txId'].apply(lambda x: 1 if x in cycle_flags else 0)
+df['fan_ratio'] = df['txId'].apply(lambda x: fan_ratio.get(x, 0.0))
 df['community_illicit_ratio'] = df['txId'].apply(
     lambda x: community_data['community_illicit_ratio'].get(
         community_data['tx_to_community'].get(x, -1), 0.0))
@@ -108,7 +110,7 @@ df['betweenness_centrality'] = df['txId'].apply(lambda x: centrality_data['betwe
 train = df[df['timestep'] <= 34]
 test = df[df['timestep'] > 34]
 
-hand_cols = ['in_cycle', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
+hand_cols = ['fan_ratio', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
 hybrid_cols = feat_cols + hand_cols + emb_cols
 
 X_train = train[hybrid_cols]
@@ -123,7 +125,22 @@ print("\n=== Hybrid model (raw + hand-engineered graph features + GCN embeddings
 model_hybrid = XGBClassifier(eval_metric='logloss')
 model_hybrid.fit(X_train, y_train)
 preds_hybrid = model_hybrid.predict(X_test)
+proba_hybrid = model_hybrid.predict_proba(X_test)[:, 1]
+auc_pr_hybrid = average_precision_score(y_test, proba_hybrid)
+report_hybrid = classification_report(y_test, preds_hybrid, target_names=['licit', 'illicit'],
+                                       output_dict=True)
 print(classification_report(y_test, preds_hybrid, target_names=['licit', 'illicit']))
+print(f"AUC-PR (illicit): {auc_pr_hybrid:.4f}")
+
+upsert_model("hybrid", {
+    "name": "Hybrid",
+    "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality) + GCN hidden-layer embeddings, XGBoost",
+    "precision": round(report_hybrid['illicit']['precision'], 4),
+    "recall": round(report_hybrid['illicit']['recall'], 4),
+    "f1": round(report_hybrid['illicit']['f1-score'], 4),
+    "auc_pr": round(float(auc_pr_hybrid), 4),
+})
 
 joblib.dump(model_hybrid, 'data/hybrid_model.pkl')
 print("Model saved to data/hybrid_model.pkl")
+print("Results written to data/results.json")
