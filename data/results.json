@@ -1,0 +1,81 @@
+{
+  "test_set": {
+    "total": 16670,
+    "illicit": 1083
+  },
+  "models": [
+    {
+      "id": "baseline",
+      "name": "Baseline",
+      "description": "Raw 165 transaction features only, XGBoost",
+      "precision": 0.8985,
+      "recall": 0.7276,
+      "f1": 0.8041,
+      "auc_pr": 0.7997
+    },
+    {
+      "id": "graph_augmented",
+      "name": "Graph-augmented",
+      "description": "Raw features + hand-engineered graph features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality), XGBoost",
+      "precision": 0.9942,
+      "recall": 0.6297,
+      "f1": 0.7711,
+      "auc_pr": 0.7982
+    },
+    {
+      "id": "gcn",
+      "name": "GCN",
+      "description": "Raw features + learned graph structure (2-layer Graph Convolutional Network, no hand-engineered features)",
+      "precision": 0.6178,
+      "recall": 0.6223,
+      "f1": 0.6201,
+      "auc_pr": 0.6177
+    },
+    {
+      "id": "hybrid",
+      "name": "Hybrid",
+      "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality) + GCN hidden-layer embeddings, XGBoost",
+      "precision": 0.9885,
+      "recall": 0.6353,
+      "f1": 0.7735,
+      "auc_pr": 0.7845
+    }
+  ],
+  "cross_validation": {
+    "description": "Walk-forward CV across 4 time-based splits (train <= timestep 26/30/34/38, test on the rest), for the two models that don't depend on a GCN pretrained on a fixed label split. community_illicit_ratio is recomputed fresh per fold from that fold's training labels only.",
+    "splits": [
+      26,
+      30,
+      34,
+      38
+    ],
+    "models": [
+      {
+        "id": "baseline",
+        "name": "Baseline",
+        "precision_mean": 0.9139,
+        "precision_std": 0.0249,
+        "recall_mean": 0.7264,
+        "recall_std": 0.06,
+        "f1_mean": 0.8073,
+        "f1_std": 0.0334,
+        "auc_pr_mean": 0.8287,
+        "auc_pr_std": 0.0434
+      },
+      {
+        "id": "graph_augmented",
+        "name": "Graph-augmented",
+        "precision_mean": 0.9884,
+        "precision_std": 0.0041,
+        "recall_mean": 0.5961,
+        "recall_std": 0.0358,
+        "f1_mean": 0.7431,
+        "f1_std": 0.0285,
+        "auc_pr_mean": 0.8259,
+        "auc_pr_std": 0.0329
+      }
+    ],
+    "note": "Confirmed across all 4 walk-forward splits, not just the single-split number: baseline wins F1 at every split (0.849 vs 0.763, 0.819 vs 0.740, 0.804 vs 0.771, 0.757 vs 0.698), while graph-augmented precision is both higher and far more stable (std +/-0.004 vs baseline +/-0.025). AUC-PR is close between the two models across folds too (mean 0.829 vs 0.826), with baseline ahead on 3 of the 4 splits - a genuine near-tie in overall ranking ability, while the F1 gap reflects a specific tradeoff at the default classification threshold rather than a difference in the models fundamental discriminative power. GCN and Hybrid are excluded from this CV because both depend on a GCN trained once using labels from timestep<=34 only; reusing it for a CV split whose test set overlaps that range would leak labels into the test set."
+  },
+  "note": "After replacing in_cycle (constant-zero and useless - the transaction graph is a DAG, so cycles cannot exist) with fan_ratio (a DAG-appropriate fan-in/fan-out balance measure) and fixing a label-leakage bug in community_illicit_ratio (see README, Methodology fix), the baseline (raw features only) has the best F1 (0.80) of the three XGBoost variants. Graph-augmented and Hybrid both push precision to ~0.99 but recall falls to ~0.63, netting a lower F1 (0.77 each) than the baseline. AUC-PR - which does not depend on a classification threshold - tells a more balanced story: baseline (0.800) and graph-augmented (0.798) are almost identical, and hybrid trails slightly (0.785), meaning the graph-augmented model ranks transactions by risk about as well as the baseline overall, but its default 0.5 probability threshold produces a specific high-precision/low-recall operating point rather than a genuinely weaker model - a different threshold might recover more balanced precision/recall. Both metrics are reported together for exactly this reason: F1 alone would overstate how different these models really are. GCN remains the weakest model on every metric (F1 0.62, AUC-PR 0.62), consistent with the original Elliptic benchmark paper (Weber et al., 2019), where a similarly simple GCN was beaten by a Random Forest with hand-engineered features."
+}

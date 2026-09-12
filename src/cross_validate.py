@@ -30,10 +30,11 @@ rather than done silently or incorrectly here.
 """
 import pandas as pd
 import pickle
-import json
 import numpy as np
 from xgboost import XGBClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, average_precision_score
+
+from results_io import set_cross_validation
 
 features = pd.read_csv('data/elliptic_txs_features.csv', header=None)
 features.columns = ['txId', 'timestep'] + [f'feat_{i}' for i in range(165)]
@@ -42,8 +43,8 @@ df = features.merge(classes, on='txId', how='left')
 df = df[df['class'] != 'unknown'].copy()
 df['class'] = df['class'].map({'1': 1, '2': 0})
 
-with open('data/cycle_flags.pkl', 'rb') as f:
-    cycle_flags = pickle.load(f)
+with open('data/fan_ratio.pkl', 'rb') as f:
+    fan_ratio = pickle.load(f)
 with open('data/community_data.pkl', 'rb') as f:
     community_data = pickle.load(f)
 with open('data/centrality_data.pkl', 'rb') as f:
@@ -58,19 +59,19 @@ labeled['class'] = labeled['class'].map({'1': 1, '2': 0}).astype(int)
 labeled = labeled.merge(features[['txId', 'timestep']], on='txId', how='left')
 labeled['community'] = labeled['txId'].map(tx_to_community)
 
-df['in_cycle'] = df['txId'].apply(lambda x: 1 if x in cycle_flags else 0)
+df['fan_ratio'] = df['txId'].apply(lambda x: fan_ratio.get(x, 0.0))
 df['degree_centrality'] = df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0))
 df['betweenness_centrality'] = df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0))
 df['community'] = df['txId'].map(tx_to_community)
 
 feat_cols = [c for c in df.columns if c.startswith('feat_')]
-graph_cols = ['in_cycle', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
+graph_cols = ['fan_ratio', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
 
 # Walk-forward splits: (train up to and including this timestep, then test on the rest)
 SPLITS = [26, 30, 34, 38]
 
-results = {"baseline": {"precision": [], "recall": [], "f1": []},
-           "graph_augmented": {"precision": [], "recall": [], "f1": []}}
+results = {"baseline": {"precision": [], "recall": [], "f1": [], "auc_pr": []},
+           "graph_augmented": {"precision": [], "recall": [], "f1": [], "auc_pr": []}}
 
 for cutoff in SPLITS:
     # Recompute the community illicit ratio using ONLY this fold's
@@ -93,23 +94,35 @@ for cutoff in SPLITS:
         model = XGBClassifier(eval_metric='logloss')
         model.fit(train[cols], y_train)
         preds = model.predict(test[cols])
+        proba = model.predict_proba(test[cols])[:, 1]
+        auc_pr = average_precision_score(y_test, proba)
         report = classification_report(y_test, preds, target_names=['licit', 'illicit'],
                                         output_dict=True, zero_division=0)
         p, r, f1 = report['illicit']['precision'], report['illicit']['recall'], report['illicit']['f1-score']
         results[key]["precision"].append(p)
         results[key]["recall"].append(r)
         results[key]["f1"].append(f1)
-        print(f"  {name:18s} precision={p:.3f} recall={r:.3f} f1={f1:.3f}")
+        results[key]["auc_pr"].append(auc_pr)
+        print(f"  {name:18s} precision={p:.3f} recall={r:.3f} f1={f1:.3f} auc_pr={auc_pr:.3f}")
 
 print("\n=== Walk-forward CV summary (mean +/- std across {} splits) ===".format(len(SPLITS)))
-summary = {}
+cv_models = []
 for key, label in [("baseline", "Baseline"), ("graph_augmented", "Graph-augmented")]:
     m = {stat: (float(np.mean(results[key][stat])), float(np.std(results[key][stat])))
-         for stat in ["precision", "recall", "f1"]}
-    summary[key] = m
+         for stat in ["precision", "recall", "f1", "auc_pr"]}
     print(f"{label:18s} " + " ".join(
-        f"{stat}={m[stat][0]:.3f}+/-{m[stat][1]:.3f}" for stat in ["precision", "recall", "f1"]))
+        f"{stat}={m[stat][0]:.3f}+/-{m[stat][1]:.3f}" for stat in ["precision", "recall", "f1", "auc_pr"]))
+    cv_models.append({
+        "id": key, "name": label,
+        "precision_mean": round(m["precision"][0], 4), "precision_std": round(m["precision"][1], 4),
+        "recall_mean": round(m["recall"][0], 4), "recall_std": round(m["recall"][1], 4),
+        "f1_mean": round(m["f1"][0], 4), "f1_std": round(m["f1"][1], 4),
+        "auc_pr_mean": round(m["auc_pr"][0], 4), "auc_pr_std": round(m["auc_pr"][1], 4),
+    })
 
-with open('data/cv_results.json', 'w') as f:
-    json.dump({"splits": SPLITS, "results": results, "summary": summary}, f, indent=2)
-print("\nSaved to data/cv_results.json")
+set_cross_validation({
+    "description": "Walk-forward CV across 4 time-based splits (train <= timestep 26/30/34/38, test on the rest), for the two models that don't depend on a GCN pretrained on a fixed label split. community_illicit_ratio is recomputed fresh per fold from that fold's training labels only.",
+    "splits": SPLITS,
+    "models": cv_models,
+})
+print("\nSaved to data/results.json")

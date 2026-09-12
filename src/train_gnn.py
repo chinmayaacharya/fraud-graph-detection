@@ -29,7 +29,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, average_precision_score
+
+from results_io import upsert_model
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -127,11 +129,29 @@ for epoch in range(1, EPOCHS + 1):
 model.eval()
 with torch.no_grad():
     final_out = model(X, adj)
+    final_probs = F.softmax(final_out, dim=1)[:, 1]
     final_preds = final_out[test_mask].argmax(dim=1)
 
+y_test_np = y[test_mask].numpy()
+preds_np = final_preds.numpy()
+proba_np = final_probs[test_mask].numpy()
+auc_pr_gcn = average_precision_score(y_test_np, proba_np)
+report_gcn = classification_report(y_test_np, preds_np, target_names=['licit', 'illicit'],
+                                    zero_division=0, output_dict=True)
+
 print("\n=== GCN (graph-structure model, 165 raw features + learned propagation) ===")
-print(classification_report(y[test_mask].numpy(), final_preds.numpy(),
-                             target_names=['licit', 'illicit'], zero_division=0))
+print(classification_report(y_test_np, preds_np, target_names=['licit', 'illicit'], zero_division=0))
+print(f"AUC-PR (illicit): {auc_pr_gcn:.4f}")
+
+upsert_model("gcn", {
+    "name": "GCN",
+    "description": "Raw features + learned graph structure (2-layer Graph Convolutional Network, no hand-engineered features)",
+    "precision": round(report_gcn['illicit']['precision'], 4),
+    "recall": round(report_gcn['illicit']['recall'], 4),
+    "f1": round(report_gcn['illicit']['f1-score'], 4),
+    "auc_pr": round(float(auc_pr_gcn), 4),
+})
 
 torch.save(model.state_dict(), 'data/gcn_model.pt')
 print("Model saved to data/gcn_model.pt")
+print("Results written to data/results.json")
