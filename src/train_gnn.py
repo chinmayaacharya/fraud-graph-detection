@@ -32,6 +32,7 @@ import torch.nn.functional as F
 from sklearn.metrics import classification_report, average_precision_score
 
 from results_io import upsert_model
+from predictions_io import save_model_predictions
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -151,6 +152,11 @@ upsert_model("gcn", {
     "f1": round(report_gcn['illicit']['f1-score'], 4),
     "auc_pr": round(float(auc_pr_gcn), 4),
 })
+
+# final_probs already covers every node in the graph (transductive setting,
+# not just the labeled test split) - save all of it for the live API to
+# look up, same as every other model.
+save_model_predictions('gcn', dict(zip(tx_ids, final_probs.numpy())))
 
 torch.save(model.state_dict(), 'data/gcn_model.pt')
 print("Model saved to data/gcn_model.pt")

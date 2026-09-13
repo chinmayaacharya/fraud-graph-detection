@@ -5,7 +5,6 @@ import random
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import joblib
 import pandas as pd
 import pickle
 
@@ -13,11 +12,20 @@ app = FastAPI(title="Fraud Risk Scoring API")
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
-model = joblib.load('data/model.pkl')
+# Every model's per-transaction probability is precomputed by the training
+# scripts (train_model.py, train_gnn.py, train_hybrid.py) into
+# data/predictions.pkl - the API does a dict lookup, not live model
+# inference. This avoids needing to load 3 different model formats (two
+# XGBoost variants, a GCN needing a live adjacency matrix + torch) into
+# this process, and avoids the exact class of bug this project already hit
+# once: building a live feature vector by hand and getting a column out of
+# order relative to what the model was trained on.
+with open('data/predictions.pkl', 'rb') as f:
+    predictions = pickle.load(f)
 
 features = pd.read_csv('data/elliptic_txs_features.csv', header=None)
 features.columns = ['txId', 'timestep'] + [f'feat_{i}' for i in range(165)]
-feat_cols = [c for c in features.columns if c.startswith('feat_')]
+valid_tx_ids = set(features['txId'])
 
 classes = pd.read_csv('data/elliptic_txs_classes.csv', dtype={'class': str})
 
@@ -25,12 +33,9 @@ with open('data/fan_ratio.pkl', 'rb') as f:
     fan_ratio_data = pickle.load(f)
 with open('data/community_data.pkl', 'rb') as f:
     community_data = pickle.load(f)
-with open('data/centrality_data.pkl', 'rb') as f:
-    centrality_data = pickle.load(f)
 
 # Metrics live in data/results.json, written by the training scripts
-# themselves (train_model.py, train_gnn.py, train_hybrid.py,
-# cross_validate.py) via results_io.py - not hand-copied here, since that
+# themselves via results_io.py - not hand-copied here, since that
 # manual-transcription step is exactly how this project once shipped
 # numbers that didn't match what was actually trained.
 with open('data/results.json') as f:
@@ -38,31 +43,24 @@ with open('data/results.json') as f:
 
 
 def score_tx(tx_id: int):
-    row = features[features['txId'] == tx_id]
-    if row.empty:
+    if tx_id not in valid_tx_ids:
         return {"tx_id": tx_id, "error": "Transaction ID not found"}
+
+    scores = predictions.get(tx_id, {})
 
     fan_ratio_val = fan_ratio_data.get(tx_id, 0.0)
     community_ratio = community_data['community_illicit_ratio'].get(
         community_data['tx_to_community'].get(tx_id, -1), 0.0)
-    degree = centrality_data['degree'].get(tx_id, 0.0)
-    betweenness = centrality_data['betweenness'].get(tx_id, 0.0)
-
-    # Build a one-row DataFrame with the same column names/order train_model.py
-    # used, rather than a raw list - the model was fit on named columns, and a
-    # positional list is one accidental reorder away from silently wrong
-    # predictions with no warning.
-    row_input = row[feat_cols].copy()
-    row_input['fan_ratio'] = fan_ratio_val
-    row_input['community_illicit_ratio'] = community_ratio
-    row_input['degree_centrality'] = degree
-    row_input['betweenness_centrality'] = betweenness
-
-    risk_score = model.predict_proba(row_input)[0][1]
 
     return {
         "tx_id": tx_id,
-        "risk_score": float(risk_score),
+        # The project's own evaluation (see /results) found the baseline
+        # model has the best F1 of the four - so it's the headline score,
+        # not graph-augmented, even though graph-augmented uses more of
+        # the work in this project. risk_scores below gives the full
+        # breakdown so nothing is hidden.
+        "risk_score": scores.get("baseline"),
+        "risk_scores": scores,
         "flags": {
             "pass_through_like": bool(fan_ratio_val >= 0.9),
             "high_risk_community": bool(community_ratio > 0.3)

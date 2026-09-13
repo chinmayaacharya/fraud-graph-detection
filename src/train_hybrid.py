@@ -27,6 +27,7 @@ from xgboost import XGBClassifier
 from sklearn.metrics import classification_report, average_precision_score
 
 from results_io import upsert_model
+from predictions_io import save_model_predictions
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -89,9 +90,10 @@ emb_df = pd.DataFrame(embeddings, columns=emb_cols)
 emb_df['txId'] = tx_ids
 
 # --- Hand-engineered graph features (same as train_model.py) ---
-df = df.merge(emb_df, on='txId', how='left')
-df = df[df['class'] != 'unknown'].copy()
-df['class'] = df['class'].map({'1': 1, '2': 0})
+# Computed on the FULL (labeled + unlabeled) set so predictions can be
+# saved for every known transaction, not just the labeled ones used to
+# train/evaluate - matches train_model.py's approach.
+full_df = df.merge(emb_df, on='txId', how='left')
 
 with open('data/fan_ratio.pkl', 'rb') as f:
     fan_ratio = pickle.load(f)
@@ -100,12 +102,18 @@ with open('data/community_data.pkl', 'rb') as f:
 with open('data/centrality_data.pkl', 'rb') as f:
     centrality_data = pickle.load(f)
 
-df['fan_ratio'] = df['txId'].apply(lambda x: fan_ratio.get(x, 0.0))
-df['community_illicit_ratio'] = df['txId'].apply(
-    lambda x: community_data['community_illicit_ratio'].get(
-        community_data['tx_to_community'].get(x, -1), 0.0))
-df['degree_centrality'] = df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0))
-df['betweenness_centrality'] = df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0))
+graph_feature_cols = pd.DataFrame({
+    'fan_ratio': full_df['txId'].apply(lambda x: fan_ratio.get(x, 0.0)),
+    'community_illicit_ratio': full_df['txId'].apply(
+        lambda x: community_data['community_illicit_ratio'].get(
+            community_data['tx_to_community'].get(x, -1), 0.0)),
+    'degree_centrality': full_df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0)),
+    'betweenness_centrality': full_df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0)),
+})
+full_df = pd.concat([full_df, graph_feature_cols], axis=1)
+
+df = full_df[full_df['class'] != 'unknown'].copy()
+df['class'] = df['class'].map({'1': 1, '2': 0})
 
 train = df[df['timestep'] <= 34]
 test = df[df['timestep'] > 34]
@@ -122,7 +130,7 @@ print(f"Hybrid feature count: {len(hybrid_cols)} "
       f"({len(feat_cols)} raw + {len(hand_cols)} hand-engineered + {len(emb_cols)} GCN embedding)")
 
 print("\n=== Hybrid model (raw + hand-engineered graph features + GCN embeddings, XGBoost) ===")
-model_hybrid = XGBClassifier(eval_metric='logloss')
+model_hybrid = XGBClassifier(eval_metric='logloss', random_state=42)
 model_hybrid.fit(X_train, y_train)
 preds_hybrid = model_hybrid.predict(X_test)
 proba_hybrid = model_hybrid.predict_proba(X_test)[:, 1]
@@ -141,6 +149,9 @@ upsert_model("hybrid", {
     "auc_pr": round(float(auc_pr_hybrid), 4),
 })
 
+full_proba_hybrid = model_hybrid.predict_proba(full_df[hybrid_cols])[:, 1]
+save_model_predictions('hybrid', dict(zip(full_df['txId'], full_proba_hybrid)))
+
 joblib.dump(model_hybrid, 'data/hybrid_model.pkl')
 print("Model saved to data/hybrid_model.pkl")
-print("Results written to data/results.json")
+print("Results written to data/results.json, predictions written to data/predictions.pkl")

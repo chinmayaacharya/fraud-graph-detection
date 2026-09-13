@@ -152,6 +152,24 @@ was fit on into what's being called a "test" set. Properly cross-validating the 
 retraining it from scratch per split (each run takes several minutes on CPU) - a real cost, left as
 future work rather than done incorrectly here.
 
+## Serving predictions: which model does the live API actually use?
+
+An earlier version of this project served predictions from the graph-augmented model - the same one
+this README now shows loses to the baseline on F1. That's a real inconsistency (why deploy the model
+your own evaluation says is worse?), caught in review and fixed: `train_model.py`, `train_gnn.py`, and
+`train_hybrid.py` each precompute their model's probability for *every* known transaction (not just the
+test split) and write it into `data/predictions.pkl` (`src/predictions_io.py`). The API
+(`GET /analyze/{tx_id}`) does a plain dict lookup - no live model inference, no risk of rebuilding a
+feature vector with columns in the wrong order (the exact bug class this project already hit once) -
+and returns:
+- `risk_score`: the **baseline** model's probability, since it has the best F1 of the four
+- `risk_scores`: all four models' probabilities together, so the comparison this whole project is about
+  is visible on every single request, not just in this README
+
+This also means the API can score *any* known transaction, labeled or not (203,769 of them), not just
+the ~46K used for training/evaluation - a strict improvement over the earlier version, which could only
+build features for rows it could compute community/centrality lookups for at request time anyway.
+
 ## Limitations
 - Cycle detection (`src/cycle_detection.py`) found **zero cycles in every one of the 49 timesteps**.
   This isn't a bug: Bitcoin's UTXO model makes the transaction graph a directed acyclic graph by
@@ -171,13 +189,15 @@ future work rather than done incorrectly here.
   Community *membership* uses no label information (Louvain only looks at graph connectivity) - only the
   per-community illicit *ratio* uses labels, and that computation is now restricted to training-period
   labels only, per the Methodology fix above.
-- **Centrality (degree and betweenness) is computed from the full graph's structure, across all
-  timesteps, using no label information whatsoever** - stated explicitly here because it's the one
-  hand-engineered feature that touches "future" graph structure (edges from timesteps after the training
-  cutoff), unlike the label-based community ratio. This is a defensible design choice, not a leakage bug:
-  in a real deployment, the transaction graph's topology (who has transacted with whom) is observable
-  as it forms, and using the fuller graph for structural measures like centrality is standard practice
-  in this literature - but it is a real assumption worth being explicit about, since it means centrality
+- **Centrality (degree and betweenness) and `fan_ratio` are both computed from the full graph's
+  structure, across all timesteps, using no label information whatsoever** - stated explicitly here
+  because these are the hand-engineered features that touch "future" graph structure (edges from
+  timesteps after the training cutoff), unlike the label-based community ratio, which is now
+  restricted to training-period labels. This is a defensible design choice, not a leakage bug: in a
+  real deployment, the transaction graph's topology (who has transacted with whom) is observable as it
+  forms, and using the fuller graph for structural measures is standard practice in this literature
+  (the GCN's message passing makes the same choice, for the same reason - see `train_gnn.py`'s design
+  notes) - but it is a real assumption worth being explicit about, since it means these three features'
   values for training-period nodes are informed by connections that hadn't happened yet at that time.
 - Betweenness centrality sampled (k=500) rather than exact, for performance.
 

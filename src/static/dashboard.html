@@ -113,13 +113,15 @@
   </div>
 
   <div class="panel">
+    <div class="section-title">Risk score (Baseline model - best F1 per this project's own evaluation above)</div>
     <div id="chart" class="bars"><div class="empty">Run an analysis to see results here.</div></div>
   </div>
 
   <div class="panel">
+    <div class="section-title">Full per-model breakdown</div>
     <table id="table" style="display:none">
       <thead>
-        <tr><th>TX ID</th><th>Risk score</th><th>Pass-through-like</th><th>High-risk community</th></tr>
+        <tr><th>TX ID</th><th>Baseline</th><th>Graph-aug.</th><th>GCN</th><th>Hybrid</th><th>Pass-through-like</th><th>High-risk community</th></tr>
       </thead>
       <tbody id="tableBody"></tbody>
     </table>
@@ -172,12 +174,19 @@ function render(results) {
   tableBody.innerHTML = sorted.map(r => `
     <tr>
       <td class="mono">${r.tx_id}</td>
-      <td class="mono">${r.risk_score.toFixed(4)}</td>
+      <td class="mono">${fmtScore(r.risk_scores.baseline)}</td>
+      <td class="mono">${fmtScore(r.risk_scores.graph_augmented)}</td>
+      <td class="mono">${fmtScore(r.risk_scores.gcn)}</td>
+      <td class="mono">${fmtScore(r.risk_scores.hybrid)}</td>
       <td><span class="badge ${r.flags.pass_through_like ? 'yes' : 'no'}">${r.flags.pass_through_like ? 'yes' : 'no'}</span></td>
       <td><span class="badge ${r.flags.high_risk_community ? 'yes' : 'no'}">${r.flags.high_risk_community ? 'yes' : 'no'}</span></td>
     </tr>
   `).join('');
   tableEl.style.display = 'table';
+}
+
+function fmtScore(v) {
+  return (v === undefined || v === null) ? '—' : v.toFixed(4);
 }
 
 async function analyze() {
