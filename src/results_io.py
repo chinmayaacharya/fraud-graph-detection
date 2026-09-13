@@ -17,6 +17,8 @@ DEFAULT = {
     "test_set": {"total": 16670, "illicit": 1083},
     "models": [],
     "cross_validation": None,
+    "calibration": None,
+    "drift_analysis": None,
     "note": ""
 }
 
@@ -44,6 +46,18 @@ def upsert_model(model_id, entry):
 def set_cross_validation(cv_entry):
     data = load_results()
     data["cross_validation"] = cv_entry
+    save_results(data)
+
+
+def set_calibration(calibration_entry):
+    data = load_results()
+    data["calibration"] = calibration_entry
+    save_results(data)
+
+
+def set_drift_analysis(drift_entry):
+    data = load_results()
+    data["drift_analysis"] = drift_entry
     save_results(data)
 
 

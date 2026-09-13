@@ -46,12 +46,27 @@ N = len(tx_ids)
 feat_cols = [c for c in df.columns if c.startswith('feat_')]
 X = torch.tensor(df[feat_cols].values, dtype=torch.float32)
 
+# Guard against an edge referencing a txId this features file doesn't
+# have - would otherwise raise a mid-run KeyError. Doesn't happen with the
+# actual Elliptic files (checked: 0 dropped), but the code shouldn't
+# assume that silently.
+edge_mask = edges['txId1'].isin(id_to_idx) & edges['txId2'].isin(id_to_idx)
+if not edge_mask.all():
+    print(f"WARNING: dropping {(~edge_mask).sum()} edges referencing a txId "
+          f"not present in the features file")
+edges = edges[edge_mask]
+
 src = np.array([id_to_idx[t] for t in edges['txId1']])
 dst = np.array([id_to_idx[t] for t in edges['txId2']])
 row = np.concatenate([src, dst, np.arange(N)])
 col = np.concatenate([dst, src, np.arange(N)])
 deg = np.zeros(N)
 np.add.at(deg, row, 1.0)
+# Every node gets a self-loop (np.arange(N) above), so deg is guaranteed
+# >=1 for all N nodes - this division is only safe *because* of that, not
+# by accident of the data. Asserted explicitly so a future refactor that
+# drops self-loops fails loudly instead of silently producing NaN/inf.
+assert (deg >= 1).all(), "deg_inv_sqrt would divide by zero - self-loops missing?"
 deg_inv_sqrt = 1.0 / np.sqrt(deg)
 weight = deg_inv_sqrt[row] * deg_inv_sqrt[col]
 indices = torch.tensor(np.vstack([row, col]), dtype=torch.long)
@@ -107,8 +122,8 @@ graph_feature_cols = pd.DataFrame({
     'community_illicit_ratio': full_df['txId'].apply(
         lambda x: community_data['community_illicit_ratio'].get(
             community_data['tx_to_community'].get(x, -1), 0.0)),
-    'degree_centrality': full_df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0)),
-    'betweenness_centrality': full_df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0)),
+    'in_degree_centrality': full_df['txId'].apply(lambda x: centrality_data['in_degree'].get(x, 0.0)),
+    'out_degree_centrality': full_df['txId'].apply(lambda x: centrality_data['out_degree'].get(x, 0.0)),
 })
 full_df = pd.concat([full_df, graph_feature_cols], axis=1)
 
@@ -118,7 +133,7 @@ df['class'] = df['class'].map({'1': 1, '2': 0})
 train = df[df['timestep'] <= 34]
 test = df[df['timestep'] > 34]
 
-hand_cols = ['fan_ratio', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
+hand_cols = ['fan_ratio', 'community_illicit_ratio', 'in_degree_centrality', 'out_degree_centrality']
 hybrid_cols = feat_cols + hand_cols + emb_cols
 
 X_train = train[hybrid_cols]
@@ -142,7 +157,7 @@ print(f"AUC-PR (illicit): {auc_pr_hybrid:.4f}")
 
 upsert_model("hybrid", {
     "name": "Hybrid",
-    "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality) + GCN hidden-layer embeddings, XGBoost",
+    "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, in/out-degree centrality) + GCN hidden-layer embeddings, XGBoost",
     "precision": round(report_hybrid['illicit']['precision'], 4),
     "recall": round(report_hybrid['illicit']['recall'], 4),
     "f1": round(report_hybrid['illicit']['f1-score'], 4),

@@ -23,8 +23,16 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 with open('data/predictions.pkl', 'rb') as f:
     predictions = pickle.load(f)
 
+# NOTE on memory: this loads the full ~690MB features file into memory for
+# the life of the process, just to check "does this txId exist" - fine for
+# a local/demo deployment, worth knowing before running this anywhere with
+# tighter memory limits. float32 (vs pandas' float64 default) roughly
+# halves it; only txId is actually needed here, so this could be trimmed
+# further (usecols=[0]) if memory ever becomes a real constraint.
 features = pd.read_csv('data/elliptic_txs_features.csv', header=None)
 features.columns = ['txId', 'timestep'] + [f'feat_{i}' for i in range(165)]
+raw_feat_cols = [c for c in features.columns if c.startswith('feat_')]
+features[raw_feat_cols] = features[raw_feat_cols].astype('float32')
 valid_tx_ids = set(features['txId'])
 
 classes = pd.read_csv('data/elliptic_txs_classes.csv', dtype={'class': str})

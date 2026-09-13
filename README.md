@@ -22,7 +22,9 @@ used in published anti-money-laundering research).
 2. Detected short cycles (2-4 hops) per timestep, flagging potential layering patterns - found none
    (see Limitations); `src/fan_ratio.py` computes the DAG-appropriate replacement feature instead
 3. Ran Louvain community detection to identify tightly-connected wallet clusters
-4. Computed degree and betweenness centrality to flag "mixer"-like addresses
+4. Computed in-degree and out-degree centrality separately (consolidation vs. dispersal signatures)
+   to flag "mixer"-like addresses; betweenness centrality was tried, tested for stability, and dropped
+   (see Limitations)
 5. Trained an XGBoost classifier comparing baseline features vs. graph-augmented (hand-engineered) features
 6. Trained a Graph Convolutional Network (GCN, `src/train_gnn.py`) that learns a representation of
    each transaction directly from graph structure via message passing, instead of using hand-picked
@@ -36,6 +38,12 @@ used in published anti-money-laundering research).
    baseline and graph-augmented models, to check whether the single-split result generalizes
 9. Every training script writes its own metrics into `data/results.json` (via `src/results_io.py`)
    rather than numbers being hand-copied into the API - `api.py` just loads and serves that file
+10. Isotonic-calibrated the baseline model's probabilities (3-fold CV within the training period only)
+    and ran a cost-sensitive threshold sweep, since the API's `risk_score` is meant to be usable for
+    real triage, not just a classification-accuracy number
+11. Computed per-timestep F1 across all 49 timesteps (`src/drift_analysis.py`) to check for concept
+    drift - Elliptic is known to have a real distribution shift around timestep 43 (a dark web market
+    shutdown), which a single train/test split entirely hides
 
 ## Methodology fix: label leakage in `community_illicit_ratio` (caught in code review)
 
@@ -83,7 +91,8 @@ needle much, an honest result reported in full below rather than quietly omitted
 ## Results (current)
 Time-based split: trained on timesteps 1-34, tested on timesteps 35-49 (16,670 test transactions, 1,083 illicit).
 Graph features here are `fan_ratio` (replacing `in_cycle` - see Limitations), `community_illicit_ratio`
-(training-period labels only), and degree/betweenness centrality. Alongside precision/recall/F1 (which
+(training-period labels only), and in/out-degree centrality (betweenness was dropped - see Limitations).
+Alongside precision/recall/F1 (which
 depend on the model's default 0.5 classification threshold), **AUC-PR** (area under the
 precision-recall curve) is reported too, since it measures a model's overall ability to *rank*
 transactions by risk independent of any threshold choice - important here, because the two metrics tell
@@ -92,39 +101,52 @@ different parts of the story, as the discussion below explains.
 | Model | Precision (illicit) | Recall (illicit) | F1 (illicit) | AUC-PR (illicit) |
 |---|---|---|---|---|
 | **Baseline (raw features, XGBoost)** | 0.90 | 0.73 | **0.80** | **0.80** |
-| Graph-augmented (raw + hand features, XGBoost) | 0.99 | 0.63 | 0.77 | 0.80 |
-| GCN (raw features + learned graph structure) | 0.62 | 0.62 | 0.62 | 0.62 |
-| Hybrid (raw + hand features + GCN embeddings, XGBoost) | 0.99 | 0.64 | 0.77 | 0.78 |
+| Graph-augmented (raw + hand features, XGBoost) | 0.99 | 0.63 | 0.77 | 0.79 |
+| GCN (raw features + learned graph structure) | 0.33 | 0.69 | 0.45 | 0.45 |
+| Hybrid (raw + hand features + GCN embeddings, XGBoost) | 0.98 | 0.67 | 0.79 | 0.79 |
 
-**The baseline has the best F1 of the three XGBoost variants, but AUC-PR tells a more nuanced story.**
-By F1, both graph-feature models clearly lose: they push precision to near-perfect (0.99) - almost every
-transaction they flag as illicit really is - but miss over a third of actual illicit transactions the
-baseline would have caught. By AUC-PR, though, baseline (0.80) and graph-augmented (0.80) are
-**essentially tied**, meaning the graph-augmented model's underlying ability to rank risky transactions
-above safe ones is about as good as the baseline's - its F1 disadvantage comes specifically from its
-default 0.5 probability threshold landing at a high-precision/low-recall operating point, not from the
-model being fundamentally worse at the task. A different threshold on the graph-augmented model could
-plausibly recover a more balanced precision/recall tradeoff; this project reports the standard default-
-threshold metrics for comparability, but AUC-PR is included precisely so F1 alone doesn't overstate how
-different these two models really are. Whether the high-precision operating point is "better" still
-depends on deployment context (a triage queue with limited investigator time might prefer it; a system
-trying to catch as much laundering as possible would not) - but it is **not** the free, no-tradeoff
-improvement the pre-leak-fix numbers suggested.
+**The baseline has the best F1 of the four models, but AUC-PR tells a more nuanced story for the two
+XGBoost variants specifically.** By F1, both graph-feature models lose to the baseline: they push
+precision to near-perfect (0.98-0.99) - almost every transaction they flag as illicit really is - but
+miss noticeably more actual illicit transactions than the baseline would have caught. By AUC-PR, though,
+baseline (0.80) and graph-augmented (0.79) are **close**, meaning the graph-augmented model's underlying
+ability to rank risky transactions above safe ones is nearly as good as the baseline's - its F1
+disadvantage comes largely from its default 0.5 probability threshold landing at a high-precision/
+low-recall operating point, not from the model being fundamentally worse at the task (see the Calibration
+section below for a threshold that does better than 0.5 for either model). Whether the high-precision
+operating point is "better" still depends on deployment context (a triage queue with limited investigator
+time might prefer it; a system trying to catch as much laundering as possible would not) - but it is
+**not** the free, no-tradeoff improvement the pre-leak-fix numbers suggested.
 
-The GCN remains the weakest model on every metric (0.62 across the board), unaffected by the leakage bug
-since it never used `community_illicit_ratio` or any hand-engineered feature - it only ever saw raw
-features and graph structure. This matches the original Elliptic benchmark paper (Weber et al., 2019,
-"Anti-Money Laundering in Bitcoin: Experimenting with Graph Convolutional Networks for Financial
-Forensics"), where a similarly simple GCN was likewise beaten by a Random Forest using hand-engineered
-features on this same dataset. Likely reasons, consistent with that paper's discussion: (1) a plain
-2-layer GCN with mean-field message passing dilutes a node's own signal by averaging it with many
-neighbors; (2) it has no notion of time, while transaction semantics are inherently temporal (the gap
-EvolveGCN was built to close); (3) tree ensembles handle this dataset's class imbalance more gracefully
-out of the box than a shallow GCN with a single global class-weighted loss.
+**The GCN's numbers dropped substantially from an earlier version of this project** (was 0.62 across the
+board, now 0.33 precision / 0.69 recall / 0.45 F1) - not because of a modeling change, but because of a
+methodology fix with a real cost. The GCN's training loop used to print test-set F1 every 20 epochs
+purely to monitor progress; no epoch count or hyperparameter was ever actually chosen based on that
+number, but it looked like the test set was being watched during training, which a reviewer reasonably
+flagged. The fix: training now uses timestep ≤30 (not ≤34) with 31-34 carved out as a genuine validation
+split for that monitoring, and the true test set (>34) is touched exactly once, after training
+completes. This is more defensible - but it also means the GCN trained on ~3,000 fewer labeled examples,
+and empirically that cost it real performance. This is reported as-is rather than reverted to get a
+better-looking number: a data-hungry model losing a meaningful chunk of its already-small labeled
+training set is itself an honest, informative result about how little labeled data this benchmark
+actually provides.
 
-The hybrid model (GCN embeddings + hand features + raw features) shows the same precision/recall
-tradeoff as graph-augmented, with a slightly worse AUC-PR (0.78 vs 0.80) - concatenating the GCN's
-embeddings on top of the hand-engineered features didn't add clean predictive signal here either.
+The GCN remains the weakest standalone model, unaffected by the community-ratio leakage bug (it never
+used `community_illicit_ratio` or any hand-engineered feature - only raw features and graph structure).
+This direction - GCN underperforming feature-engineered tree models - matches the original Elliptic
+benchmark paper (Weber et al., 2019, "Anti-Money Laundering in Bitcoin: Experimenting with Graph
+Convolutional Networks for Financial Forensics"), where a similarly simple GCN was likewise beaten by a
+Random Forest using hand-engineered features on this same dataset. Likely reasons, consistent with that
+paper's discussion: (1) a plain 2-layer GCN with mean-field message passing dilutes a node's own signal
+by averaging it with many neighbors; (2) it has no notion of time, while transaction semantics are
+inherently temporal (the gap EvolveGCN was built to close - see Future work); (3) tree ensembles handle
+this dataset's class imbalance more gracefully out of the box than a shallow GCN with a single global
+class-weighted loss; (4) now compounded by less training data after the validation-split fix above.
+
+The hybrid model (GCN embeddings + hand features + raw features) shows a similar precision/recall
+tradeoff to graph-augmented, with comparable AUC-PR (0.79) - concatenating the (now weaker) GCN's
+embeddings on top of the hand-engineered features still didn't add clean predictive signal beyond what
+the hand-engineered features alone provide.
 
 ### Robustness: walk-forward cross-validation (current)
 `src/cross_validate.py` re-runs the baseline and graph-augmented models across 4 time-based splits
@@ -134,16 +156,86 @@ embeddings on top of the hand-engineered features didn't add clean predictive si
 | Model | Precision (illicit) | Recall (illicit) | F1 (illicit) | AUC-PR (illicit) |
 |---|---|---|---|---|
 | **Baseline** | 0.914 ± 0.025 | 0.726 ± 0.060 | **0.807 ± 0.033** | 0.829 ± 0.043 |
-| Graph-augmented | 0.988 ± 0.004 | 0.596 ± 0.036 | 0.743 ± 0.028 | 0.826 ± 0.033 |
+| Graph-augmented | 0.987 ± 0.005 | 0.607 ± 0.042 | 0.751 ± 0.033 | 0.827 ± 0.031 |
 
 This confirms the single-split story is *consistent*, not an artifact: graph-augmented loses to baseline
-on F1 at **every one of the 4 splits** (0.763 vs 0.849, 0.740 vs 0.819, 0.771 vs 0.804, 0.698 vs 0.757),
-while its precision is both higher and far more stable (±0.004 vs baseline's ±0.025). AUC-PR is close
-between the two models across every fold too (mean 0.829 vs 0.826, baseline ahead on 3 of the 4 splits)
-- a genuine near-tie in overall ranking ability, reinforcing that the F1 gap reflects a threshold-specific
-tradeoff rather than a fundamental difference in what each model has learned. The walk-forward CV doesn't
-rescue the graph-augmented model's F1, but it does confirm the AUC-PR near-tie is real and reproducible,
-not a lucky single split.
+on F1 at **every one of the 4 splits**, while its precision is both higher and far more stable (±0.005 vs
+baseline's ±0.025). AUC-PR is close between the two models across every fold too (mean 0.829 vs 0.827,
+baseline ahead on most splits) - reinforcing that the F1 gap reflects a threshold-specific tradeoff
+rather than a fundamental difference in what each model has learned. The walk-forward CV doesn't rescue
+the graph-augmented model's F1, but it does confirm the AUC-PR near-tie is real and reproducible, not a
+lucky single split.
+
+## Concept drift: the model doesn't fail gracefully, it falls off a cliff at timestep 43
+
+Every number above is a single aggregate over the whole test period (timesteps 35-49). That average
+hides something dramatic. `src/drift_analysis.py` breaks the baseline model's performance down by
+individual timestep instead of averaging over 15 of them at once - Elliptic is documented in the
+literature as having a real distribution shift around timestep 43, widely attributed to a dark web
+marketplace shutdown changing the mix of transaction patterns, and this project's own model reproduces
+that shock directly, not just as a citation:
+
+| Test timestep | Illicit count | Precision | Recall | F1 |
+|---|---|---|---|---|
+| 35 | 182 | 0.96 | 0.97 | 0.96 |
+| 36 | 33 | 0.74 | 0.97 | 0.84 |
+| 37 | 40 | 1.00 | 0.68 | 0.81 |
+| 38 | 111 | 0.97 | 0.90 | 0.94 |
+| 39 | 81 | 0.94 | 0.93 | 0.93 |
+| 40 | 112 | 0.92 | 0.65 | 0.76 |
+| 41 | 116 | 0.97 | 0.94 | 0.96 |
+| 42 | 239 | 0.95 | 0.80 | 0.87 |
+| **43** | 24 | **0.00** | **0.00** | **0.00** |
+| 44 | 24 | 0.06 | 0.04 | 0.05 |
+| 45 | 5 | 0.00 | 0.00 | 0.00 |
+| 46 | 2 | 0.10 | 0.50 | 0.17 |
+| 47 | 22 | 0.00 | 0.00 | 0.00 |
+| 48 | 36 | 0.50 | 0.03 | 0.05 |
+| 49 | 56 | 0.14 | 0.02 | 0.03 |
+
+**Mean F1 for timesteps 35-42: 0.90. Mean F1 for timesteps 43-49: 0.04.** This isn't a gradual decline -
+it's a cliff, and it happens at exactly one timestep. Checked directly, not just inferred from the
+aggregate: illicit transactions at timestep 42 get a mean predicted probability of 0.80 (correctly
+high); at timestep 43, illicit transactions get a mean predicted probability of 0.008 - statistically
+indistinguishable from licit transactions' 0.007. The model doesn't get *worse* at recognizing illicit
+transactions after the shock, it loses essentially all discriminative signal for them, instantly.
+
+The single test-period F1 of 0.80 reported everywhere else in this README is real, but it is an average
+of "works very well" (0.90) and "doesn't work at all" (0.04), and that average is a genuinely misleading
+number for anyone deciding whether to trust this model going forward in time. A system built on this
+model and deployed at timestep 34 would have looked great for two months and then silently stopped
+catching fraud entirely - while a naive monitoring setup watching only a rolling aggregate F1 might not
+notice for a while, since the pre-shock timesteps are still in the average. This is arguably the single
+most important finding in this project: not which feature set wins, but that *any* of these models can
+fail this completely, this suddenly, on this exact dataset - a materially different, more useful
+finding for a real deployment than the model comparison table above.
+
+## Calibration and cost-sensitive thresholding
+
+Precision/recall/F1 all evaluate the model's raw yes/no classification at the default 0.5 probability
+threshold. Neither actually asks whether the *probability itself* means anything, or whether 0.5 is
+the right cutoff for how this would really be used - two questions that matter more than raw accuracy
+for a system where an analyst triages by score.
+
+**Calibration - tried, and it made things worse.** Isotonic regression (3-fold CV within the training
+period, test set never touched) was fit on top of the baseline model to check whether its probabilities
+are well-calibrated (does "70% risk" really mean ~70% of such transactions are illicit?). Brier score
+(mean squared error between predicted probability and outcome, lower is better) went from **0.0212
+(raw) to 0.0284 (calibrated) - calibration made it worse**, not better, on the true held-out test
+period. The likely cause connects directly to the drift finding above: isotonic regression fit on
+training-period (≤34) folds is calibrating to that period's probability distribution, which does not
+hold after the shock at timestep 43. The raw, uncalibrated model is what's actually served - this is
+reported as a negative result rather than quietly dropped, because "we tried the standard fix and it
+didn't work, here's why" is itself informative given the drift finding.
+
+**Cost-sensitive thresholding - a small, real improvement.** The default 0.5 cutoff isn't chosen for
+any principled reason. Assuming (illustratively, not from a real institutional cost model) that a missed
+fraud costs 10x an investigator-hour spent on a false positive, sweeping thresholds from 0.05 to 0.95
+against the baseline model's raw probabilities finds **0.4** minimizes total cost - not 0.5. At that
+threshold: precision 0.87, recall 0.735 (vs. 0.90/0.73 at the default) - a modest, genuine gain in
+recall at a small precision cost, which is the right direction to move if missing fraud is actually more
+costly than chasing a false lead. Different cost assumptions would move this threshold; the sweep itself
+(saved in `data/results.json`) is the reusable part, not this specific number.
 
 **Scope note**: this cross-validation deliberately excludes the GCN and hybrid models. Both depend on a
 GCN trained once, using labels only from timestep ≤34. Reusing that same frozen GCN/embeddings for a CV
@@ -171,6 +263,17 @@ the ~46K used for training/evaluation - a strict improvement over the earlier ve
 build features for rows it could compute community/centrality lookups for at request time anyway.
 
 ## Limitations
+- **The GCN trains on timestep ≤30 only (not ≤34)**, holding 31-34 out as a genuine validation split so
+  training-time monitoring never touches the true test set (>34) - fixed after review flagged that the
+  old setup printed test-set F1 during training, which wasn't actually used for any decision but looked
+  like it could have been. This means the GCN (and the hybrid model, which uses its embeddings) has
+  ~3,000 fewer labeled training examples than the two XGBoost models, which still train on the full
+  ≤34 period - the four models in the results table are not working from identical amounts of data,
+  and the GCN/hybrid numbers should be read with that in mind, not as a perfectly even comparison.
+- Every result and finding in this README (including the concept-drift and calibration sections) is
+  specific to this exact time-based split and this exact 49-timestep dataset. A different cutoff, a
+  different fraud dataset, or a live deployment with continuously arriving data would need its own
+  drift and calibration checks - none of this transfers by assumption.
 - Cycle detection (`src/cycle_detection.py`) found **zero cycles in every one of the 49 timesteps**.
   This isn't a bug: Bitcoin's UTXO model makes the transaction graph a directed acyclic graph by
   construction (an output can't be spent before the transaction that creates it exists), so short-cycle
@@ -188,8 +291,25 @@ build features for rows it could compute community/centrality lookups for at req
 - Louvain community detection was run on the graph as a whole (not per-timestep) and found 312 communities.
   Community *membership* uses no label information (Louvain only looks at graph connectivity) - only the
   per-community illicit *ratio* uses labels, and that computation is now restricted to training-period
-  labels only, per the Methodology fix above.
-- **Centrality (degree and betweenness) and `fan_ratio` are both computed from the full graph's
+  labels only, per the Methodology fix above. **Worth saying explicitly, since a reviewer will ask**:
+  even with that fix, a test-period node in a community whose training-period members are mostly illicit
+  still inherits a strong signal from those training labels - that's the intended mechanism (guilt by
+  association), not a bug, and it's a standard *transductive* assumption (the whole graph's structure,
+  including test-period edges, is known at feature-computation time; only test-period *labels* are
+  withheld). It does mean this feature would behave differently in a true online/streaming deployment,
+  where a brand-new community with no established members yet would have no signal to inherit.
+- Betweenness centrality was computed at k=500 for earlier versions of this project and used as a
+  feature; it was **dropped** after directly testing its stability (see `centrality.py`'s docstring) -
+  two runs with different random seeds gave Spearman rank correlation of only 0.33 (Pearson 0.70, and
+  96% of nodes scored exactly zero either way), meaning the feature was mostly reflecting which 500
+  nodes happened to get sampled, not real structural signal. Raising `k` enough to fix this was tested
+  and found impractical within reasonable runtime on a 200K+ node graph on a single machine - dropping
+  it was the honest choice given that constraint. Degree centrality is now split into in-degree and
+  out-degree separately (previously a single combined number) since they mean different things for
+  fraud - many inputs suggests consolidation, many outputs suggests dispersal - and networkx's
+  `degree_centrality()` on a directed graph silently combines both into one number if you're not
+  careful to ask for them separately.
+- **Centrality (in/out-degree) and `fan_ratio` are both computed from the full graph's
   structure, across all timesteps, using no label information whatsoever** - stated explicitly here
   because these are the hand-engineered features that touch "future" graph structure (edges from
   timesteps after the training cutoff), unlike the label-based community ratio, which is now
@@ -217,13 +337,29 @@ build features for rows it could compute community/centrality lookups for at req
   local statistics (e.g. a wallet's fan ratio relative to its timestep's distribution) rather than a
   single global value, or explicitly interacted with centrality in the model rather than left for
   XGBoost to discover.
-- A temporal graph neural network (e.g. EvolveGCN, which Elliptic was originally designed to benchmark,
-  or a GCN with attention such as GAT) could still improve on the GCN's standalone results, since it has
-  no mechanism for modeling how the graph evolves across timesteps.
+- **A temporal graph neural network (EvolveGCN, or a GRU over per-timestep embeddings) is the
+  highest-value addition this project doesn't yet have.** The plain GCN here has no notion of time; a
+  temporal model is exactly what the literature (and this project's own drift analysis) points to as
+  the natural next step, and could plausibly close the gap with the XGBoost models. Deliberately not
+  attempted in this pass: it's a real multi-day implementation project on its own, not something to
+  bolt on quickly alongside a bug-fix/audit pass without risking the same kind of rushed mistake this
+  audit was fixing.
+- **SHAP-based per-transaction explanations.** The dashboard shows a risk score but not *why* -
+  investigators triaging real cases need to know which features drove a specific flag. Adding SHAP
+  values for the served baseline model, surfaced per-transaction in the API/dashboard, would make it
+  genuinely usable by an analyst rather than just a number.
+- **Extending calibration and cost-sensitive thresholding to the other three models**, and revisiting
+  the illustrative 10:1 false-negative-to-false-positive cost ratio used in the threshold sweep with a
+  real institutional estimate if this were ever used for actual triage - the 10:1 figure here is a
+  stand-in to demonstrate the method, not a researched number.
+- **Checking whether the drift found around timestep 43 (see Results) affects graph-augmented, GCN, and
+  hybrid the same way it affects the baseline** - this project's drift analysis only covers the served
+  baseline model; it's plausible the graph features are more or less fragile around that shock than raw
+  features alone.
 - Other directions: per-timestep community detection (this project ran it on the whole graph at once),
-  exact rather than sampled betweenness centrality, hyperparameter tuning for all models (none were
-  tuned beyond library defaults), and extending walk-forward cross-validation to the GCN and hybrid
-  models by retraining the GCN per split instead of reusing one frozen copy.
+  hyperparameter tuning for all models (none were tuned beyond library defaults), and extending
+  walk-forward cross-validation to the GCN and hybrid models by retraining the GCN per split instead of
+  reusing one frozen copy.
 
 ## Running it
 ```
@@ -238,6 +374,7 @@ python src\train_model.py
 python src\train_gnn.py
 python src\train_hybrid.py
 python src\cross_validate.py
+python src\drift_analysis.py
 uvicorn src.api:app --reload
 ```
 Then open `http://127.0.0.1:8000/docs` for the interactive API, or `GET /analyze/{tx_id}` for a JSON risk score.

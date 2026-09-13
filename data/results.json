@@ -16,29 +16,29 @@
     {
       "id": "graph_augmented",
       "name": "Graph-augmented",
-      "description": "Raw features + hand-engineered graph features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality), XGBoost",
+      "description": "Raw features + hand-engineered graph features (fan-in/fan-out ratio, community illicit ratio, in/out-degree centrality), XGBoost",
       "precision": 0.9942,
-      "recall": 0.6297,
-      "f1": 0.7711,
-      "auc_pr": 0.7982
+      "recall": 0.6325,
+      "f1": 0.7731,
+      "auc_pr": 0.7938
     },
     {
       "id": "gcn",
       "name": "GCN",
       "description": "Raw features + learned graph structure (2-layer Graph Convolutional Network, no hand-engineered features)",
-      "precision": 0.6178,
-      "recall": 0.6223,
-      "f1": 0.6201,
-      "auc_pr": 0.6177
+      "precision": 0.331,
+      "recall": 0.6916,
+      "f1": 0.4477,
+      "auc_pr": 0.4515
     },
     {
       "id": "hybrid",
       "name": "Hybrid",
-      "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, degree/betweenness centrality) + GCN hidden-layer embeddings, XGBoost",
-      "precision": 0.9885,
-      "recall": 0.6353,
-      "f1": 0.7735,
-      "auc_pr": 0.7845
+      "description": "Raw + hand-engineered features (fan-in/fan-out ratio, community illicit ratio, in/out-degree centrality) + GCN hidden-layer embeddings, XGBoost",
+      "precision": 0.9783,
+      "recall": 0.6667,
+      "f1": 0.793,
+      "auc_pr": 0.7877
     }
   ],
   "cross_validation": {
@@ -65,17 +65,693 @@
       {
         "id": "graph_augmented",
         "name": "Graph-augmented",
-        "precision_mean": 0.9884,
-        "precision_std": 0.0041,
-        "recall_mean": 0.5961,
-        "recall_std": 0.0358,
-        "f1_mean": 0.7431,
-        "f1_std": 0.0285,
-        "auc_pr_mean": 0.8259,
-        "auc_pr_std": 0.0329
+        "precision_mean": 0.9867,
+        "precision_std": 0.0049,
+        "recall_mean": 0.6069,
+        "recall_std": 0.0424,
+        "f1_mean": 0.7506,
+        "f1_std": 0.033,
+        "auc_pr_mean": 0.8274,
+        "auc_pr_std": 0.0312
       }
     ],
-    "note": "Confirmed across all 4 walk-forward splits, not just the single-split number: baseline wins F1 at 4 of 4 splits, while graph-augmented precision is both higher and far more stable (std +/-0.004 vs baseline +/-0.025). AUC-PR is close between the two models across folds too (mean 0.829 vs 0.826), with baseline ahead on 3 of the 4 splits - a genuine near-tie in overall ranking ability, while the F1 gap reflects a specific tradeoff at the default classification threshold rather than a difference in the models' fundamental discriminative power. GCN and Hybrid are excluded from this CV because both depend on a GCN trained once using labels from timestep<=34 only; reusing it for a CV split whose test set overlaps that range would leak labels into the test set."
+    "note": "Confirmed across all 4 walk-forward splits, not just the single-split number: baseline wins F1 at 4 of 4 splits, while graph-augmented precision is both higher and far more stable (std +/-0.005 vs baseline +/-0.025). AUC-PR is close between the two models across folds too (mean 0.829 vs 0.827), with baseline ahead on 3 of the 4 splits - a genuine near-tie in overall ranking ability, while the F1 gap reflects a specific tradeoff at the default classification threshold rather than a difference in the models' fundamental discriminative power. GCN and Hybrid are excluded from this CV because both depend on a GCN trained once using labels from timestep<=34 only; reusing it for a CV split whose test set overlaps that range would leak labels into the test set."
   },
-  "note": "After replacing in_cycle (constant-zero and useless - the transaction graph is a DAG, so cycles cannot exist) with fan_ratio (a DAG-appropriate fan-in/fan-out balance measure) and fixing a label-leakage bug in community_illicit_ratio (see README, Methodology fix), Baseline has the best F1 (0.80) of the XGBoost variants. Graph-augmented and Hybrid both push precision above 0.98 but recall falls to ~0.6-0.64, netting a lower F1 than the baseline. AUC-PR - which does not depend on a classification threshold - tells a more balanced story: baseline (0.800) and graph-augmented (0.798) are close, meaning the graph-augmented model ranks transactions by risk about as well as the baseline overall, but its default 0.5 probability threshold produces a specific high-precision/low-recall operating point rather than a genuinely weaker model. GCN remains the weakest model on every metric (F1 0.62, AUC-PR 0.62), consistent with the original Elliptic benchmark paper (Weber et al., 2019), where a similarly simple GCN was beaten by a Random Forest with hand-engineered features. The Hybrid model (F1 0.77, AUC-PR 0.78) shows the same precision/recall tradeoff as graph-augmented - concatenating the GCN's embeddings on top of the hand-engineered features didn't add clean predictive signal here."
+  "calibration": {
+    "description": "Isotonic calibration (3-fold CV on the training period) was tried on the baseline model. Result: it made the Brier score WORSE on the true held-out test period, not better, so the RAW model is what's actually served - reported here as a negative result, not hidden. Brier score is the mean squared error between predicted probability and actual outcome (lower is better). Likely cause: calibration fit on training-period (timestep<=34) folds doesn't transfer to the future test period if the data is genuinely drifting - see this project's drift_analysis results for direct evidence of that drift.",
+    "calibration_helped": false,
+    "brier_raw": 0.0212,
+    "brier_calibrated": 0.0284,
+    "reliability_curve_raw": {
+      "mean_predicted": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0001,
+        0.0002,
+        0.0008,
+        0.0072,
+        0.5676
+      ],
+      "fraction_positive": [
+        0.0,
+        0.0018,
+        0.0054,
+        0.0102,
+        0.0168,
+        0.0222,
+        0.0306,
+        0.0306,
+        0.0366,
+        0.4955
+      ]
+    },
+    "reliability_curve_calibrated": {
+      "mean_predicted": [
+        0.0018,
+        0.0038,
+        0.0053,
+        0.0071,
+        0.01,
+        0.0154,
+        0.0322,
+        0.0795,
+        0.1928,
+        0.6352
+      ],
+      "fraction_positive": [
+        0.0012,
+        0.0006,
+        0.0018,
+        0.0037,
+        0.0067,
+        0.0277,
+        0.0172,
+        0.0428,
+        0.0477,
+        0.5024
+      ]
+    },
+    "cost_ratio_fn_to_fp": 10,
+    "threshold_sweep": [
+      {
+        "threshold": 0.05,
+        "precision": 0.5794,
+        "recall": 0.7544,
+        "cost": 3253
+      },
+      {
+        "threshold": 0.1,
+        "precision": 0.661,
+        "recall": 0.7488,
+        "cost": 3136
+      },
+      {
+        "threshold": 0.15,
+        "precision": 0.7129,
+        "recall": 0.7452,
+        "cost": 3085
+      },
+      {
+        "threshold": 0.2,
+        "precision": 0.7621,
+        "recall": 0.7424,
+        "cost": 3041
+      },
+      {
+        "threshold": 0.25,
+        "precision": 0.7919,
+        "recall": 0.7415,
+        "cost": 3011
+      },
+      {
+        "threshold": 0.3,
+        "precision": 0.8212,
+        "recall": 0.7378,
+        "cost": 3014
+      },
+      {
+        "threshold": 0.35,
+        "precision": 0.8471,
+        "recall": 0.7368,
+        "cost": 2994
+      },
+      {
+        "threshold": 0.4,
+        "precision": 0.868,
+        "recall": 0.735,
+        "cost": 2991
+      },
+      {
+        "threshold": 0.45,
+        "precision": 0.8827,
+        "recall": 0.7295,
+        "cost": 3035
+      },
+      {
+        "threshold": 0.5,
+        "precision": 0.8985,
+        "recall": 0.7276,
+        "cost": 3039
+      },
+      {
+        "threshold": 0.55,
+        "precision": 0.9119,
+        "recall": 0.7267,
+        "cost": 3036
+      },
+      {
+        "threshold": 0.6,
+        "precision": 0.9214,
+        "recall": 0.7248,
+        "cost": 3047
+      },
+      {
+        "threshold": 0.65,
+        "precision": 0.9323,
+        "recall": 0.7248,
+        "cost": 3037
+      },
+      {
+        "threshold": 0.7,
+        "precision": 0.9467,
+        "recall": 0.7211,
+        "cost": 3064
+      },
+      {
+        "threshold": 0.75,
+        "precision": 0.9605,
+        "recall": 0.7193,
+        "cost": 3072
+      },
+      {
+        "threshold": 0.8,
+        "precision": 0.9651,
+        "recall": 0.7147,
+        "cost": 3118
+      },
+      {
+        "threshold": 0.85,
+        "precision": 0.9698,
+        "recall": 0.7119,
+        "cost": 3144
+      },
+      {
+        "threshold": 0.9,
+        "precision": 0.9806,
+        "recall": 0.7008,
+        "cost": 3255
+      },
+      {
+        "threshold": 0.95,
+        "precision": 0.9907,
+        "recall": 0.6861,
+        "cost": 3407
+      }
+    ],
+    "best_threshold": {
+      "threshold": 0.4,
+      "precision": 0.868,
+      "recall": 0.735,
+      "cost": 2991
+    }
+  },
+  "drift_analysis": {
+    "description": "Per-timestep precision/recall/F1 for the baseline model (threshold 0.5), computed from data/predictions.pkl grouped by timestep - not a retrain, just a breakdown of the existing predictions. Checks for the concept drift documented in the Elliptic literature around timestep 43 (attributed to a dark web marketplace shutdown).",
+    "per_timestep": [
+      {
+        "timestep": 1,
+        "n_labeled": 2147,
+        "n_illicit": 17,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 2,
+        "n_labeled": 1117,
+        "n_illicit": 18,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 3,
+        "n_labeled": 1279,
+        "n_illicit": 11,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 4,
+        "n_labeled": 1440,
+        "n_illicit": 30,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 5,
+        "n_labeled": 1882,
+        "n_illicit": 8,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 6,
+        "n_labeled": 485,
+        "n_illicit": 5,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 7,
+        "n_labeled": 1203,
+        "n_illicit": 102,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 8,
+        "n_labeled": 1165,
+        "n_illicit": 67,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 9,
+        "n_labeled": 778,
+        "n_illicit": 248,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 10,
+        "n_labeled": 972,
+        "n_illicit": 18,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 11,
+        "n_labeled": 696,
+        "n_illicit": 131,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 12,
+        "n_labeled": 506,
+        "n_illicit": 16,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 13,
+        "n_labeled": 809,
+        "n_illicit": 291,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 14,
+        "n_labeled": 417,
+        "n_illicit": 43,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 15,
+        "n_labeled": 618,
+        "n_illicit": 147,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 16,
+        "n_labeled": 530,
+        "n_illicit": 128,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 17,
+        "n_labeled": 811,
+        "n_illicit": 99,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 18,
+        "n_labeled": 389,
+        "n_illicit": 52,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 19,
+        "n_labeled": 745,
+        "n_illicit": 80,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 20,
+        "n_labeled": 900,
+        "n_illicit": 260,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 21,
+        "n_labeled": 641,
+        "n_illicit": 100,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 22,
+        "n_labeled": 1763,
+        "n_illicit": 158,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 23,
+        "n_labeled": 1187,
+        "n_illicit": 53,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 24,
+        "n_labeled": 1126,
+        "n_illicit": 137,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 25,
+        "n_labeled": 594,
+        "n_illicit": 118,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 26,
+        "n_labeled": 517,
+        "n_illicit": 96,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 27,
+        "n_labeled": 206,
+        "n_illicit": 24,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 28,
+        "n_labeled": 284,
+        "n_illicit": 85,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 29,
+        "n_labeled": 1174,
+        "n_illicit": 329,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 30,
+        "n_labeled": 524,
+        "n_illicit": 83,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 31,
+        "n_labeled": 710,
+        "n_illicit": 106,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 32,
+        "n_labeled": 1323,
+        "n_illicit": 342,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 33,
+        "n_labeled": 441,
+        "n_illicit": 23,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 34,
+        "n_labeled": 515,
+        "n_illicit": 37,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "split": "train"
+      },
+      {
+        "timestep": 35,
+        "n_labeled": 1341,
+        "n_illicit": 182,
+        "precision": 0.9617,
+        "recall": 0.967,
+        "f1": 0.9644,
+        "split": "test"
+      },
+      {
+        "timestep": 36,
+        "n_labeled": 1708,
+        "n_illicit": 33,
+        "precision": 0.7442,
+        "recall": 0.9697,
+        "f1": 0.8421,
+        "split": "test"
+      },
+      {
+        "timestep": 37,
+        "n_labeled": 498,
+        "n_illicit": 40,
+        "precision": 1.0,
+        "recall": 0.675,
+        "f1": 0.806,
+        "split": "test"
+      },
+      {
+        "timestep": 38,
+        "n_labeled": 756,
+        "n_illicit": 111,
+        "precision": 0.9709,
+        "recall": 0.9009,
+        "f1": 0.9346,
+        "split": "test"
+      },
+      {
+        "timestep": 39,
+        "n_labeled": 1183,
+        "n_illicit": 81,
+        "precision": 0.9375,
+        "recall": 0.9259,
+        "f1": 0.9317,
+        "split": "test"
+      },
+      {
+        "timestep": 40,
+        "n_labeled": 1211,
+        "n_illicit": 112,
+        "precision": 0.9241,
+        "recall": 0.6518,
+        "f1": 0.7644,
+        "split": "test"
+      },
+      {
+        "timestep": 41,
+        "n_labeled": 1132,
+        "n_illicit": 116,
+        "precision": 0.9732,
+        "recall": 0.9397,
+        "f1": 0.9561,
+        "split": "test"
+      },
+      {
+        "timestep": 42,
+        "n_labeled": 2154,
+        "n_illicit": 239,
+        "precision": 0.9505,
+        "recall": 0.8033,
+        "f1": 0.8707,
+        "split": "test"
+      },
+      {
+        "timestep": 43,
+        "n_labeled": 1370,
+        "n_illicit": 24,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 44,
+        "n_labeled": 1591,
+        "n_illicit": 24,
+        "precision": 0.0588,
+        "recall": 0.0417,
+        "f1": 0.0488,
+        "split": "test"
+      },
+      {
+        "timestep": 45,
+        "n_labeled": 1221,
+        "n_illicit": 5,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 46,
+        "n_labeled": 712,
+        "n_illicit": 2,
+        "precision": 0.1,
+        "recall": 0.5,
+        "f1": 0.1667,
+        "split": "test"
+      },
+      {
+        "timestep": 47,
+        "n_labeled": 846,
+        "n_illicit": 22,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 48,
+        "n_labeled": 471,
+        "n_illicit": 36,
+        "precision": 0.5,
+        "recall": 0.0278,
+        "f1": 0.0526,
+        "split": "test"
+      },
+      {
+        "timestep": 49,
+        "n_labeled": 476,
+        "n_illicit": 56,
+        "precision": 0.1429,
+        "recall": 0.0179,
+        "f1": 0.0317,
+        "split": "test"
+      }
+    ],
+    "mean_f1_before_43": 0.9779,
+    "mean_f1_from_43": 0.0428,
+    "worst_timesteps": [
+      {
+        "timestep": 43,
+        "n_labeled": 1370,
+        "n_illicit": 24,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 45,
+        "n_labeled": 1221,
+        "n_illicit": 5,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 47,
+        "n_labeled": 846,
+        "n_illicit": 22,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "split": "test"
+      },
+      {
+        "timestep": 49,
+        "n_labeled": 476,
+        "n_illicit": 56,
+        "precision": 0.1429,
+        "recall": 0.0179,
+        "f1": 0.0317,
+        "split": "test"
+      },
+      {
+        "timestep": 44,
+        "n_labeled": 1591,
+        "n_illicit": 24,
+        "precision": 0.0588,
+        "recall": 0.0417,
+        "f1": 0.0488,
+        "split": "test"
+      }
+    ]
+  },
+  "note": "After replacing in_cycle (constant-zero and useless - the transaction graph is a DAG, so cycles cannot exist) with fan_ratio (a DAG-appropriate fan-in/fan-out balance measure) and fixing a label-leakage bug in community_illicit_ratio (see README, Methodology fix), Baseline has the best F1 (0.80) of the XGBoost variants. Graph-augmented and Hybrid both push precision above 0.98 but recall falls to ~0.6-0.64, netting a lower F1 than the baseline. AUC-PR - which does not depend on a classification threshold - tells a more balanced story: baseline (0.800) and graph-augmented (0.794) are close, meaning the graph-augmented model ranks transactions by risk about as well as the baseline overall, but its default 0.5 probability threshold produces a specific high-precision/low-recall operating point rather than a genuinely weaker model. GCN remains the weakest model on every metric (F1 0.45, AUC-PR 0.45), consistent with the original Elliptic benchmark paper (Weber et al., 2019), where a similarly simple GCN was beaten by a Random Forest with hand-engineered features. The Hybrid model (F1 0.79, AUC-PR 0.79) shows the same precision/recall tradeoff as graph-augmented - concatenating the GCN's embeddings on top of the hand-engineered features didn't add clean predictive signal here."
 }

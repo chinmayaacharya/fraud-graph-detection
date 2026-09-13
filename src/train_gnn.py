@@ -23,6 +23,15 @@ Design notes:
   a sparse symmetric-normalized adjacency matrix (standard GCN
   propagation rule from Kipf & Welling 2017), which avoids PyG's finicky
   platform-specific wheel installation.
+- Training-time monitoring uses a VALIDATION split carved from the
+  training period (timestep <= 30 for actual training, 31-34 held out as
+  validation), not the test set. No hyperparameter or epoch-count
+  decisions are actually made from this signal (EPOCHS is a fixed
+  constant), so printing test-set F1 during training was never technically
+  leakage - but it looked like it, and a reviewer would reasonably ask
+  whether it was being used for early stopping. It wasn't, and now
+  structurally can't be: the test set (timestep > 34) is touched exactly
+  once, after training is complete.
 """
 import pandas as pd
 import numpy as np
@@ -57,12 +66,24 @@ label_map = {'1': 1, '2': 0, 'unknown': -1}
 y = torch.tensor(df['class'].map(label_map).values, dtype=torch.long)
 timestep = torch.tensor(df['timestep'].values, dtype=torch.long)
 
-train_mask = (timestep <= 34) & (y >= 0)
+train_mask = (timestep <= 30) & (y >= 0)
+val_mask = (timestep > 30) & (timestep <= 34) & (y >= 0)
 test_mask = (timestep > 34) & (y >= 0)
-print(f"Train nodes (labeled, timestep<=34): {train_mask.sum().item()}")
+print(f"Train nodes (labeled, timestep<=30): {train_mask.sum().item()}")
+print(f"Validation nodes (labeled, 30<timestep<=34): {val_mask.sum().item()}")
 print(f"Test nodes (labeled, timestep>34): {test_mask.sum().item()}")
 
 # --- Build sparse symmetric-normalized adjacency with self-loops ---
+# Guard against an edge referencing a txId this features file doesn't
+# have - would otherwise raise a mid-run KeyError. Doesn't happen with the
+# actual Elliptic files (checked: 0 dropped), but the code shouldn't
+# assume that silently.
+edge_mask = edges['txId1'].isin(id_to_idx) & edges['txId2'].isin(id_to_idx)
+if not edge_mask.all():
+    print(f"WARNING: dropping {(~edge_mask).sum()} edges referencing a txId "
+          f"not present in the features file")
+edges = edges[edge_mask]
+
 src = np.array([id_to_idx[t] for t in edges['txId1']])
 dst = np.array([id_to_idx[t] for t in edges['txId2']])
 
@@ -72,6 +93,11 @@ col = np.concatenate([dst, src, np.arange(N)])
 
 deg = np.zeros(N)
 np.add.at(deg, row, 1.0)
+# Every node gets a self-loop (np.arange(N) above), so deg is guaranteed
+# >=1 for all N nodes - this division is only safe *because* of that, not
+# by accident of the data. Asserted explicitly so a future refactor that
+# drops self-loops fails loudly instead of silently producing NaN/inf.
+assert (deg >= 1).all(), "deg_inv_sqrt would divide by zero - self-loops missing?"
 deg_inv_sqrt = 1.0 / np.sqrt(deg)
 weight = deg_inv_sqrt[row] * deg_inv_sqrt[col]
 
@@ -119,13 +145,13 @@ for epoch in range(1, EPOCHS + 1):
     if epoch % 20 == 0 or epoch == 1:
         model.eval()
         with torch.no_grad():
-            test_out = model(X, adj)
-            test_preds = test_out[test_mask].argmax(dim=1)
-            test_f1_illicit = classification_report(
-                y[test_mask].numpy(), test_preds.numpy(),
+            val_out = model(X, adj)
+            val_preds = val_out[val_mask].argmax(dim=1)
+            val_f1_illicit = classification_report(
+                y[val_mask].numpy(), val_preds.numpy(),
                 target_names=['licit', 'illicit'], output_dict=True, zero_division=0
             )['illicit']['f1-score']
-        print(f"Epoch {epoch:3d} | train loss {loss.item():.4f} | test illicit F1 {test_f1_illicit:.4f}")
+        print(f"Epoch {epoch:3d} | train loss {loss.item():.4f} | val illicit F1 {val_f1_illicit:.4f}")
 
 model.eval()
 with torch.no_grad():

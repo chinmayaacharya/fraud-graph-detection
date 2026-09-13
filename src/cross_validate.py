@@ -61,14 +61,14 @@ labeled['community'] = labeled['txId'].map(tx_to_community)
 
 static_cols = pd.DataFrame({
     'fan_ratio': df['txId'].apply(lambda x: fan_ratio.get(x, 0.0)),
-    'degree_centrality': df['txId'].apply(lambda x: centrality_data['degree'].get(x, 0.0)),
-    'betweenness_centrality': df['txId'].apply(lambda x: centrality_data['betweenness'].get(x, 0.0)),
+    'in_degree_centrality': df['txId'].apply(lambda x: centrality_data['in_degree'].get(x, 0.0)),
+    'out_degree_centrality': df['txId'].apply(lambda x: centrality_data['out_degree'].get(x, 0.0)),
     'community': df['txId'].map(tx_to_community),
 })
 df = pd.concat([df, static_cols], axis=1)
 
 feat_cols = [c for c in df.columns if c.startswith('feat_')]
-graph_cols = ['fan_ratio', 'community_illicit_ratio', 'degree_centrality', 'betweenness_centrality']
+graph_cols = ['fan_ratio', 'community_illicit_ratio', 'in_degree_centrality', 'out_degree_centrality']
 
 # Walk-forward splits: (train up to and including this timestep, then test on the rest)
 SPLITS = [26, 30, 34, 38]

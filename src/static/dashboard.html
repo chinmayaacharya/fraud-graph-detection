@@ -266,6 +266,17 @@ function renderResults(data) {
     </tr>
   `).join('');
 
+  const drift = data.drift_analysis;
+  const driftBars = drift ? drift.per_timestep.filter(r => r.split === 'test').map(r => `
+    <div class="bar-row">
+      <div class="bar-label">t=${r.timestep}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(r.f1*100).toFixed(1)}%; background:${r.timestep >= 43 ? 'var(--high)' : 'var(--low)'}"></div></div>
+      <div class="bar-value">${(r.f1*100).toFixed(0)}%</div>
+    </div>
+  `).join('') : '';
+
+  const cal = data.calibration;
+
   resultsArea.innerHTML = `
     <table>
       <thead>
@@ -286,6 +297,24 @@ function renderResults(data) {
       <tbody>${cvRows}</tbody>
     </table>
     <div class="note-box">${cv.note}</div>
+
+    ${drift ? `
+    <div class="section-title" style="margin-top:20px">Concept drift: baseline model F1 by test timestep (red = timestep &ge; 43)</div>
+    <div class="bars">${driftBars}</div>
+    <div class="note-box">Mean F1 before t43: ${drift.mean_f1_before_43.toFixed(2)}. Mean F1 from t43 on: ${drift.mean_f1_from_43.toFixed(2)}. ${drift.description}</div>
+    ` : ''}
+
+    ${cal ? `
+    <div class="section-title" style="margin-top:20px">Calibration &amp; cost-sensitive thresholding</div>
+    <div class="note-box">
+      Brier score (lower is better): raw ${cal.brier_raw.toFixed(4)} vs. isotonic-calibrated ${cal.brier_calibrated.toFixed(4)}
+      - calibration made this ${cal.calibration_helped ? 'better' : 'WORSE'}, so the raw model is served.<br><br>
+      Cost-sensitive threshold sweep (assuming a missed fraud costs ${cal.cost_ratio_fn_to_fp}&times; a false-positive
+      investigation): best threshold is <strong>${cal.best_threshold.threshold}</strong> (precision
+      ${cal.best_threshold.precision.toFixed(2)}, recall ${cal.best_threshold.recall.toFixed(2)}) vs. the default 0.5.<br><br>
+      ${cal.description}
+    </div>
+    ` : ''}
   `;
 }
 
